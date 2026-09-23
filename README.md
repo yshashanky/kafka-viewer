@@ -39,7 +39,7 @@ The UI lets you check Kafka connection status, discover and select topics, enter
 - Messages from a date/time.
 - Messages within a date/time range.
 
-Loaded messages show the partition, offset, timestamp, key, and value. Messages can be expanded to view the complete value, including formatted JSON when applicable.
+Loaded messages show the partition, offset, timestamp, key, and message value. Messages can be expanded to view the complete message value, including formatted JSON when applicable.
 
 ## V1 limitations
 
