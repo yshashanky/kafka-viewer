@@ -1,4 +1,5 @@
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,7 +23,9 @@ def main() -> None:
         "--config",
         str(config_path),
     ]
-    raise SystemExit(subprocess.call(command))
+    environment = os.environ.copy()
+    environment["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
+    raise SystemExit(subprocess.call(command, env=environment))
 
 
 if __name__ == "__main__":

@@ -28,11 +28,12 @@ def test_cli_passes_config_to_streamlit(tmp_path, monkeypatch):
     config = tmp_path / "viewer.properties"
     config.write_text("kafka.bootstrap.servers=broker:9092\n", encoding="utf-8")
     calls = []
-    monkeypatch.setattr(cli.subprocess, "call", lambda command: calls.append(command) or 0)
+    monkeypatch.setattr(cli.subprocess, "call", lambda command, env: calls.append((command, env)) or 0)
     monkeypatch.setattr("sys.argv", ["kafka-viewer-unsecured", "--config", str(config)])
 
     with pytest.raises(SystemExit) as result:
         cli.main()
 
     assert result.value.code == 0
-    assert calls and calls[0][-1] == str(config)
+    assert calls and calls[0][0][-1] == str(config)
+    assert calls[0][1]["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] == "false"

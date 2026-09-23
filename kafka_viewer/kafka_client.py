@@ -70,7 +70,6 @@ class KafkaClient:
         consumer = self.consumer_factory(
             bootstrap_servers=self.bootstrap_servers,
             request_timeout_ms=5000,
-            api_version_auto_timeout_ms=3000,
         )
         try:
             return set(consumer.topics())
