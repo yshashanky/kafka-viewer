@@ -4,22 +4,39 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kafka-viewer"
-version = "0.1.1"
+version = "0.2.0"
 description = "A lightweight local Kafka message inspection tool"
 readme = "README.md"
 requires-python = ">=3.10"
+
+authors = [
+    { name = "Shashank Yadav", email = "shashankyadav.1299@gmail.com" },
+]
+
 dependencies = [
+    "confluent-kafka[avro]>=2.8,<3",
     "kafka-python>=3.0.11,<4",
     "streamlit>=1.35,<2",
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=9.0.3,<10"]
-build = ["build>=1,<2"]
-security = ["pip-audit>=2.9,<3"]
+test = [
+    "pytest>=9.0.3,<10",
+]
+build = [
+    "build>=1,<2",
+]
+security = [
+    "pip-audit>=2.9,<3",
+]
+
+[project.urls]
+Homepage = "https://yshashanky.github.io/"
+Repository = "https://github.com/yshashanky/kafka-viewer"
+Issues = "https://github.com/yshashanky/kafka-viewer/issues"
 
 [project.scripts]
-kafka-viewer-unsecured = "kafka_viewer.cli:main"
+kafka-viewer = "kafka_viewer.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["kafka_viewer*"]
