@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
 from kafka import KafkaConsumer, TopicPartition
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry.avro import AvroDeserializer
 
 
 @dataclass(frozen=True)
@@ -16,6 +18,8 @@ class Message:
     timestamp: int | None
     key: Any
     value: Any
+    value_error: str | None = None
+    raw_value: str | None = None
 
 
 def validate_count(value: Any) -> int:
@@ -43,6 +47,8 @@ def _readable(value: Any) -> str:
 def format_value(value: Any) -> str:
     if value is None:
         return "<null>"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, indent=2, ensure_ascii=False, default=str)
     readable = _readable(value)
     try:
         parsed = json.loads(readable)
@@ -55,6 +61,25 @@ def format_key(value: Any) -> str:
     return _readable(value)
 
 
+def format_message_value(message: Message) -> str:
+    if message.value_error:
+        return f"Avro deserialization failed\n\nRaw message:\n{message.raw_value}\n\nError:\n{message.value_error}"
+    return format_value(message.value)
+
+
+def safe_raw_payload(value: Any, limit: int = 4096) -> str:
+    if value is None:
+        return "<null>"
+    if not isinstance(value, bytes):
+        return str(value)[:limit]
+    bounded = value[:limit // 2] if any(byte > 127 or byte == 0 for byte in value) else value[:limit]
+    suffix = "\n...[truncated]" if len(value) > limit else ""
+    try:
+        return bounded.decode("utf-8") + suffix
+    except UnicodeDecodeError:
+        return bounded.hex() + suffix
+
+
 def datetime_to_millis(value: datetime) -> int:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
@@ -62,15 +87,23 @@ def datetime_to_millis(value: datetime) -> int:
 
 
 class KafkaClient:
-    def __init__(self, bootstrap_servers: str, consumer_factory: Callable[..., Any] = KafkaConsumer):
-        self.bootstrap_servers = bootstrap_servers
+    def __init__(
+        self,
+        consumer_config: dict[str, Any],
+        schema_registry_config: dict[str, str] | None = None,
+        consumer_factory: Callable[..., Any] = KafkaConsumer,
+        schema_registry_factory: Callable[..., Any] = SchemaRegistryClient,
+        avro_deserializer_factory: Callable[..., Any] = AvroDeserializer,
+    ):
+        self.consumer_config = consumer_config
         self.consumer_factory = consumer_factory
+        self.value_deserializer = None
+        if schema_registry_config:
+            registry = schema_registry_factory(schema_registry_config)
+            self.value_deserializer = avro_deserializer_factory(registry)
 
     def topics(self) -> set[str]:
-        consumer = self.consumer_factory(
-            bootstrap_servers=self.bootstrap_servers,
-            request_timeout_ms=5000,
-        )
+        consumer = self._consumer(request_timeout_ms=5000)
         try:
             return set(consumer.topics())
         finally:
@@ -95,8 +128,7 @@ class KafkaClient:
         if mode == "range" and datetime_to_millis(start) > datetime_to_millis(end):
             raise ValueError("End date/time must not be before start date/time")
 
-        consumer = self.consumer_factory(
-            bootstrap_servers=self.bootstrap_servers,
+        consumer = self._consumer(
             group_id=group_id or None,
             enable_auto_commit=False,
             consumer_timeout_ms=1500,
@@ -145,7 +177,7 @@ class KafkaClient:
                         if timestamp is not None and timestamp > datetime_to_millis(end):
                             active.discard(partition)
                         continue
-                    records.append(Message(record.partition, record.offset, timestamp, record.key, record.value))
+                    records.append(self._message(record, timestamp))
                     if mode == "range" and timestamp is not None and timestamp >= datetime_to_millis(end):
                         active.discard(partition)
                     if len(records) >= count:
@@ -157,6 +189,28 @@ class KafkaClient:
             return records[-count:]
         finally:
             consumer.close()
+
+    def _consumer(self, **overrides: Any) -> Any:
+        consumer_config = {**self.consumer_config, **overrides}
+        supported = set(KafkaConsumer.DEFAULT_CONFIG)
+        return self.consumer_factory(**{key: value for key, value in consumer_config.items() if key in supported})
+
+    def _message(self, record: Any, timestamp: int | None) -> Message:
+        if self.value_deserializer is None:
+            return Message(record.partition, record.offset, timestamp, record.key, record.value)
+        try:
+            value = self.value_deserializer(record.value, None)
+            return Message(record.partition, record.offset, timestamp, record.key, value)
+        except Exception:
+            return Message(
+                record.partition,
+                record.offset,
+                timestamp,
+                record.key,
+                None,
+                "Unable to deserialize Avro message value",
+                safe_raw_payload(record.value),
+            )
 
 
 def _records(batch: dict[Any, Iterable[Any]]) -> Iterable[Any]:

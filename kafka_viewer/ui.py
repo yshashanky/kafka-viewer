@@ -6,8 +6,8 @@ from datetime import datetime, time
 
 import streamlit as st
 
-from kafka_viewer.config import load_properties
-from kafka_viewer.kafka_client import KafkaClient, format_key, format_value, generate_group_id, validate_count
+from kafka_viewer.config import build_consumer_config, build_schema_registry_config, load_properties
+from kafka_viewer.kafka_client import KafkaClient, format_key, format_message_value, generate_group_id, validate_count
 
 
 def _config_path() -> str:
@@ -34,9 +34,21 @@ def main() -> None:
         st.error(str(exc))
         return
 
+    try:
+        consumer_config, unsupported = build_consumer_config(properties)
+        schema_registry_config = build_schema_registry_config(properties)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    for property_name in unsupported:
+        st.warning(f"Unsupported Kafka property ignored: {property_name}")
     bootstrap_servers = properties["kafka.bootstrap.servers"]
     st.write(f"Broker: `{bootstrap_servers}`")
-    client = KafkaClient(bootstrap_servers)
+    try:
+        client = KafkaClient(consumer_config, schema_registry_config)
+    except Exception:
+        st.error("Unable to initialize Schema Registry Avro deserialization")
+        return
     if "connection_status" not in st.session_state:
         st.session_state.connection_status = "Connecting"
     if "topics" not in st.session_state:
@@ -112,7 +124,7 @@ def main() -> None:
         st.info("No messages loaded.")
         return
     st.dataframe(
-        [{"Partition": message.partition, "Offset": message.offset, "Timestamp": message.timestamp, "Key": format_key(message.key), "Message preview": format_value(message.value)[:500]} for message in messages],
+        [{"Partition": message.partition, "Offset": message.offset, "Timestamp": message.timestamp, "Key": format_key(message.key), "Message preview": format_message_value(message)[:500]} for message in messages],
         use_container_width=True,
         hide_index=True,
     )
@@ -120,7 +132,8 @@ def main() -> None:
     for index, message in enumerate(messages, 1):
         with st.expander(f"#{index} partition={message.partition} offset={message.offset}"):
             st.write({"Partition": message.partition, "Offset": message.offset, "Timestamp": message.timestamp, "Key": format_key(message.key)})
-            st.code(format_value(message.value), language="json" if format_value(message.value).lstrip().startswith(("{", "[")) else None)
+            formatted_value = format_message_value(message)
+            st.code(formatted_value, language="json" if formatted_value.lstrip().startswith(("{", "[")) else None)
 
 
 if __name__ == "__main__":

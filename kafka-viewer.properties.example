@@ -1,0 +1,199 @@
+# ============================================================
+# Kafka connection
+# ============================================================
+
+# Kafka bootstrap servers -> kafka-python: bootstrap_servers
+# Required.
+kafka.bootstrap.servers=localhost:9092
+
+# Kafka API version -> kafka-python: api_version
+# Optional.
+kafka.api.version=auto
+
+# Automatic commit interval -> kafka-python: auto_commit_interval_ms
+# Optional; commits remain disabled by kafka-viewer.
+kafka.auto.commit.interval.ms=5000
+
+# Offset reset policy -> kafka-python: auto_offset_reset
+# Optional: earliest, latest, or none.
+kafka.auto.offset.reset=latest
+
+# Check message CRCs -> kafka-python: check_crcs
+# Optional.
+kafka.check.crcs=true
+
+# Client identifier -> kafka-python: client_id
+# Optional.
+kafka.client.id=kafka-viewer
+
+# Connection idle timeout -> kafka-python: connections_max_idle_ms
+# Optional.
+kafka.connections.max.idle.ms=540000
+
+# Consumer poll timeout -> kafka-python: consumer_timeout_ms
+# Optional.
+kafka.consumer.timeout.ms=1500
+
+# Automatic commits are always disabled by kafka-viewer.
+# kafka.enable.auto.commit -> kafka-python: enable_auto_commit
+kafka.enable.auto.commit=false
+
+# Exclude internal topics -> kafka-python: exclude_internal_topics
+# Optional.
+kafka.exclude.internal.topics=true
+
+# Maximum fetch bytes -> kafka-python: fetch_max_bytes
+# Optional.
+kafka.fetch.max.bytes=52428800
+
+# Maximum fetch wait -> kafka-python: fetch_max_wait_ms
+# Optional.
+kafka.fetch.max.wait.ms=500
+
+# Minimum fetch bytes -> kafka-python: fetch_min_bytes
+# Optional.
+kafka.fetch.min.bytes=1
+
+# Consumer group -> kafka-python: group_id
+# Optional; the UI supplies the inspection group when loading.
+# kafka.group.id=YOUR_GROUP_ID
+
+# Static consumer group instance -> kafka-python: group_instance_id
+# Optional.
+# kafka.group.instance.id=YOUR_INSTANCE_ID
+
+# Heartbeat interval -> kafka-python: heartbeat_interval_ms
+# Optional.
+kafka.heartbeat.interval.ms=3000
+
+# Isolation level -> kafka-python: isolation_level
+# Optional: read_uncommitted or read_committed.
+kafka.isolation.level=read_uncommitted
+
+# Maximum in-flight requests -> kafka-python: max_in_flight_requests_per_connection
+# Optional.
+kafka.max.in.flight.requests.per.connection=5
+
+# Maximum bytes per partition fetch -> kafka-python: max_partition_fetch_bytes
+# Optional.
+kafka.max.partition.fetch.bytes=1048576
+
+# Maximum poll interval -> kafka-python: max_poll_interval_ms
+# Optional.
+kafka.max.poll.interval.ms=300000
+
+# Maximum records per poll -> kafka-python: max_poll_records
+# Optional.
+kafka.max.poll.records=500
+
+# Metadata refresh interval -> kafka-python: metadata_max_age_ms
+# Optional.
+kafka.metadata.max.age.ms=300000
+
+# Enable metrics -> kafka-python: metrics_enabled
+# Optional.
+kafka.metrics.enabled=false
+
+# Metrics sample count -> kafka-python: metrics_num_samples
+# Optional.
+kafka.metrics.num.samples=2
+
+# Metrics sample window -> kafka-python: metrics_sample_window_ms
+# Optional.
+kafka.metrics.sample.window.ms=30000
+
+# Receive buffer -> kafka-python: receive_buffer_bytes
+# Optional.
+kafka.receive.buffer.bytes=32768
+
+# Maximum received message size -> kafka-python: receive_message_max_bytes
+# Optional.
+kafka.receive.message.max.bytes=67108864
+
+# Maximum reconnect backoff -> kafka-python: reconnect_backoff_max_ms
+# Optional.
+kafka.reconnect.backoff.max.ms=1000
+
+# Reconnect backoff -> kafka-python: reconnect_backoff_ms
+# Optional.
+kafka.reconnect.backoff.ms=50
+
+# Request timeout -> kafka-python: request_timeout_ms
+# Optional.
+kafka.request.timeout.ms=40000
+
+# Retry backoff -> kafka-python: retry_backoff_ms
+# Optional.
+kafka.retry.backoff.ms=100
+
+# Session timeout -> kafka-python: session_timeout_ms
+# Optional.
+kafka.session.timeout.ms=10000
+
+# Send buffer -> kafka-python: send_buffer_bytes
+# Optional.
+kafka.send.buffer.bytes=131072
+
+# SOCKS5 proxy -> kafka-python: socks5_proxy
+# Optional.
+# kafka.socks5.proxy=YOUR_PROXY
+
+# ============================================================
+# Kafka security
+# ============================================================
+
+# Security protocol -> kafka-python: security_protocol
+# Optional: PLAINTEXT, SSL, SASL_PLAINTEXT, or SASL_SSL.
+kafka.security.protocol=PLAINTEXT
+
+# SASL mechanism -> kafka-python: sasl_mechanism
+# Optional: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512, GSSAPI, or OAUTHBEARER.
+# kafka.sasl.mechanism=PLAIN
+
+# SASL username for PLAIN, SCRAM, or GSSAPI.
+# Optional; uncomment and replace with a local value when using SASL.
+# kafka.sasl.username=YOUR_USERNAME
+
+# SASL password for PLAIN or SCRAM.
+# Optional; uncomment and replace with a local value when using SASL.
+# kafka.sasl.password=YOUR_PASSWORD
+
+# SSL CA file -> kafka-python: ssl_cafile
+# Optional; local path to a CA file.
+# kafka.ssl.cafile=C:\path\to\ca.pem
+
+# SSL certificate file -> kafka-python: ssl_certfile
+# Optional; local path to a client certificate.
+# kafka.ssl.certfile=C:\path\to\client.crt
+
+# Verify SSL hostnames -> kafka-python: ssl_check_hostname
+# Optional.
+kafka.ssl.check.hostname=true
+
+# SSL cipher list -> kafka-python: ssl_ciphers
+# Optional.
+# kafka.ssl.ciphers=YOUR_CIPHER_LIST
+
+# SSL CRL file -> kafka-python: ssl_crlfile
+# Optional; local path to a CRL file.
+# kafka.ssl.crlfile=C:\path\to\client.crl
+
+# SSL private key file -> kafka-python: ssl_keyfile
+# Optional; keep the file outside source control.
+# kafka.ssl.keyfile=C:\path\to\client.key
+
+# SSL private key password -> kafka-python: ssl_password
+# Optional; keep the value outside source control.
+# kafka.ssl.password=YOUR_KEY_PASSWORD
+
+# ============================================================
+# Schema Registry / Confluent Avro
+# ============================================================
+
+# Schema Registry endpoint.
+# Optional; uncomment to enable Avro deserialization.
+# schema.registry.url=https://schema-registry.example.com
+
+# Optional Schema Registry Basic Authentication.
+# Keep credentials local and replace the placeholders when configuring a real cluster.
+# schema.registry.basic.auth.user.info=YOUR_USERNAME:YOUR_PASSWORD

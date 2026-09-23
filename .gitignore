@@ -159,7 +159,6 @@ activemq-data/
 .envrc
 .venv
 kafka-viewer.properties
-kafka-viewer.properties.example
 .vscode/
 .idea/
 env/
