@@ -1,3 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -151,6 +158,10 @@ activemq-data/
 .env
 .envrc
 .venv
+kafka-viewer.properties
+kafka-viewer.properties.example
+.vscode/
+.idea/
 env/
 venv/
 ENV/
