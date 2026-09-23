@@ -93,11 +93,6 @@ The implementation supports the Kafka security protocols and SASL mechanisms lis
 - Topic or consumer-group administration.
 - Multiple Kafka clusters.
 
-## Downloads
-
-Latest release: [v0.2.0](https://github.com/yshashanky/kafka-viewer/releases/latest)
-Download the wheel or source distribution from the release assets.
-
 ## Development
 
 ```bash
