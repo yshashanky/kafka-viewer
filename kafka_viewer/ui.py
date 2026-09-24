@@ -89,8 +89,10 @@ def main() -> None:
 
     topic = st.selectbox("Topic", topics)
     group_id = st.text_input("Consumer group ID", value=st.session_state.get("group_id", ""))
+    group_prefix = st.text_input("Group ID Prefix (optional)", value=st.session_state.get("group_id_prefix", ""))
     if st.button("Generate Temporary Group ID"):
-        st.session_state.group_id = generate_group_id()
+        st.session_state.group_id_prefix = group_prefix
+        st.session_state.group_id = generate_group_id(group_prefix)
         st.rerun()
     group_id = st.session_state.get("group_id", group_id)
     modes = {"Latest messages": "latest", "From beginning": "beginning", "From date/time": "from_date", "Date/time range": "range"}

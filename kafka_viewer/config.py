@@ -1,9 +1,20 @@
+from __future__ import annotations
+
+import atexit
+import os
+import re
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.serialization import pkcs12
 
 
 class ConfigError(ValueError):
     """Raised when the viewer configuration is invalid."""
+
 
 KAFKA_PROPERTY_MAP = {
     "kafka.bootstrap.servers": "bootstrap_servers",
@@ -44,10 +55,13 @@ KAFKA_PROPERTY_MAP = {
     "kafka.ssl.cafile": "ssl_cafile",
     "kafka.ssl.certfile": "ssl_certfile",
     "kafka.ssl.check.hostname": "ssl_check_hostname",
+    "kafka.ssl.cipher.suites": "ssl_ciphers",
     "kafka.ssl.ciphers": "ssl_ciphers",
     "kafka.ssl.crlfile": "ssl_crlfile",
+    "kafka.ssl.key.password": "ssl_password",
     "kafka.ssl.keyfile": "ssl_keyfile",
     "kafka.ssl.password": "ssl_password",
+    "kafka.ssl.protocol": "ssl_protocol",
     "kafka.socks5.proxy": "socks5_proxy",
 }
 
@@ -58,12 +72,98 @@ _BOOLEAN_PROPERTIES = {
     "kafka.metrics.enabled",
     "kafka.ssl.check.hostname",
 }
+
 _INTEGER_PROPERTIES = {
-    key for key, value in KAFKA_PROPERTY_MAP.items() if value.endswith("_ms") or value.endswith("_bytes") or value.endswith("_records") or value.endswith("_samples")
+    key
+    for key, value in KAFKA_PROPERTY_MAP.items()
+    if value.endswith("_ms")
+    or value.endswith("_bytes")
+    or value.endswith("_records")
+    or value.endswith("_samples")
 }
+
+STORE_CONFIGURATION_PROPERTIES = {
+    "kafka.ssl.truststore.location",
+    "kafka.ssl.truststore.password",
+    "kafka.ssl.truststore.type",
+    "kafka.ssl.truststore.cert.alias",
+    "kafka.ssl.keystore.location",
+    "kafka.ssl.keystore.password",
+    "kafka.ssl.keystore.type",
+    "kafka.ssl.keystore.key.alias",
+    "kafka.ssl.keystore.key.location",
+    "kafka.ssl.endpoint.identification.algorithm",
+}
+
+_INTERNAL_CONFIGURATION_PROPERTIES = {
+    "kafka.sasl.username",
+    "kafka.sasl.password",
+    "kafka.sasl.jaas.config",
+    *STORE_CONFIGURATION_PROPERTIES,
+}
+
 _SASL_MECHANISMS_WITH_PLAIN_CREDENTIALS = {"PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"}
+_SUPPORTED_SASL_MECHANISMS = _SASL_MECHANISMS_WITH_PLAIN_CREDENTIALS | {"GSSAPI", "OAUTHBEARER"}
+_SUPPORTED_SECURITY_PROTOCOLS = {"PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"}
+
 SCHEMA_REGISTRY_URL = "schema.registry.url"
 SCHEMA_REGISTRY_AUTH = "schema.registry.basic.auth.user.info"
+
+_DIRECT_ALIASES = {
+    "bootstrap.servers": "kafka.bootstrap.servers",
+    "security.protocol": "kafka.security.protocol",
+    "sasl.mechanism": "kafka.sasl.mechanism",
+    "sasl.jaas.config": "kafka.sasl.jaas.config",
+    "ssl.truststore.location": "kafka.ssl.truststore.location",
+    "ssl.truststore.password": "kafka.ssl.truststore.password",
+    "ssl.truststore.type": "kafka.ssl.truststore.type",
+    "ssl.keystore.location": "kafka.ssl.keystore.location",
+    "ssl.keystore.password": "kafka.ssl.keystore.password",
+    "ssl.keystore.type": "kafka.ssl.keystore.type",
+    "ssl.key.password": "kafka.ssl.key.password",
+    "ssl.endpoint.identification.algorithm": "kafka.ssl.endpoint.identification.algorithm",
+    "spring.kafka.bootstrap-servers": "kafka.bootstrap.servers",
+    "spring.kafka.consumer.group-id": "kafka.group.id",
+    "spring.kafka.consumer.auto-offset-reset": "kafka.auto.offset.reset",
+}
+
+_SPRING_PROPERTIES_PREFIXES = (
+    "spring.kafka.properties.",
+    "spring.kafka.consumer.properties.",
+    "spring.kafka.producer.properties.",
+    "spring.kafka.admin.properties.",
+)
+
+_JAVA_COMPATIBILITY_KEYS = {name.removeprefix("kafka.") for name in KAFKA_PROPERTY_MAP}
+_JAVA_COMPATIBILITY_KEYS.update(
+    {
+        "sasl.username",
+        "sasl.password",
+        "sasl.jaas.config",
+        "ssl.endpoint.identification.algorithm",
+        "ssl.truststore.location",
+        "ssl.truststore.password",
+        "ssl.truststore.type",
+        "ssl.truststore.cert.alias",
+        "ssl.keystore.location",
+        "ssl.keystore.password",
+        "ssl.keystore.type",
+        "ssl.keystore.key.alias",
+        "ssl.keystore.key.location",
+    }
+)
+
+_TEMP_SSL_FILES: set[str] = set()
+_INTERMEDIATE_PKCS12_PASSWORD = "kafka-viewer-temp"
+
+
+@atexit.register
+def _cleanup_temp_ssl_files() -> None:
+    for path in list(_TEMP_SSL_FILES):
+        try:
+            Path(path).unlink(missing_ok=True)
+        finally:
+            _TEMP_SSL_FILES.discard(path)
 
 
 def load_properties(path: str | Path) -> dict[str, str]:
@@ -81,7 +181,8 @@ def load_properties(path: str | Path) -> dict[str, str]:
         key, value = (part.strip() for part in line.split("=", 1))
         if not key:
             raise ConfigError(f"Invalid configuration line {line_number}: empty key")
-        properties[key] = value
+        canonical_name = _canonical_property_name(key)
+        properties[canonical_name or key] = value
 
     bootstrap_servers = properties.get("kafka.bootstrap.servers", "").strip()
     if not bootstrap_servers:
@@ -94,45 +195,19 @@ def build_consumer_config(properties: dict[str, str]) -> tuple[dict[str, Any], l
     consumer_config: dict[str, Any] = {}
     unsupported: list[str] = []
     for property_name, value in properties.items():
-        if property_name == "kafka.sasl.username" or property_name == "kafka.sasl.password":
+        if property_name in _INTERNAL_CONFIGURATION_PROPERTIES:
             continue
         consumer_name = KAFKA_PROPERTY_MAP.get(property_name)
         if consumer_name is None:
-            if property_name.startswith("kafka."):
+            if _is_kafka_related_property(property_name):
                 unsupported.append(property_name)
             continue
         consumer_config[consumer_name] = _convert_value(property_name, value)
 
-    security_protocol = consumer_config.get("security_protocol", "PLAINTEXT")
-    if security_protocol not in {"PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"}:
-        raise ConfigError("Invalid kafka.security.protocol")
-    mechanism = properties.get("kafka.sasl.mechanism", "").upper()
-    has_sasl = security_protocol.startswith("SASL_")
-    has_credentials = "kafka.sasl.username" in properties or "kafka.sasl.password" in properties
-    if (mechanism or has_credentials) and not has_sasl:
-        raise ConfigError("SASL properties require kafka.security.protocol to use SASL")
-    if has_sasl and not mechanism:
-        raise ConfigError("kafka.sasl.mechanism is required for SASL security")
-    if mechanism and mechanism not in {"PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512", "GSSAPI", "OAUTHBEARER"}:
-        raise ConfigError("Unsupported kafka.sasl.mechanism")
-    if mechanism in _SASL_MECHANISMS_WITH_PLAIN_CREDENTIALS:
-        username = properties.get("kafka.sasl.username", "")
-        password = properties.get("kafka.sasl.password", "")
-        if not username or not password:
-            raise ConfigError("kafka.sasl.username and kafka.sasl.password are required for SASL credentials")
-        consumer_config["sasl_plain_username"] = username
-        consumer_config["sasl_plain_password"] = password
-    elif mechanism == "GSSAPI":
-        username = properties.get("kafka.sasl.username", "")
-        if not username:
-            raise ConfigError("kafka.sasl.username is required for GSSAPI")
-        consumer_config["sasl_kerberos_name"] = username
-        if "kafka.sasl.password" in properties:
-            unsupported.append("kafka.sasl.password")
-    elif has_credentials:
-        unsupported.extend(name for name in ("kafka.sasl.username", "kafka.sasl.password") if name in properties)
+    _apply_sasl_configuration(properties, consumer_config, unsupported)
+    _apply_ssl_configuration(properties, consumer_config, unsupported)
     consumer_config["enable_auto_commit"] = False
-    return consumer_config, unsupported
+    return consumer_config, sorted(set(unsupported))
 
 
 def build_schema_registry_config(properties: dict[str, str]) -> dict[str, str] | None:
@@ -148,6 +223,338 @@ def build_schema_registry_config(properties: dict[str, str]) -> dict[str, str] |
     if auth:
         config["basic.auth.user.info"] = auth
     return config
+
+
+def _canonical_property_name(name: str) -> str | None:
+    if name.startswith("kafka."):
+        return name
+    if name in _DIRECT_ALIASES:
+        return _DIRECT_ALIASES[name]
+    if name in _JAVA_COMPATIBILITY_KEYS:
+        return f"kafka.{name}"
+    for prefix in _SPRING_PROPERTIES_PREFIXES:
+        if name.startswith(prefix):
+            suffix = name[len(prefix) :].replace("-", ".")
+            if suffix in _JAVA_COMPATIBILITY_KEYS:
+                return f"kafka.{suffix}"
+    return None
+
+
+def _apply_sasl_configuration(
+    properties: dict[str, str],
+    consumer_config: dict[str, Any],
+    unsupported: list[str],
+) -> None:
+    security_protocol = str(consumer_config.get("security_protocol", "PLAINTEXT")).upper()
+    if security_protocol not in _SUPPORTED_SECURITY_PROTOCOLS:
+        raise ConfigError("Invalid kafka.security.protocol")
+
+    mechanism = properties.get("kafka.sasl.mechanism", "").upper()
+    has_sasl = security_protocol.startswith("SASL_")
+
+    username = properties.get("kafka.sasl.username", "")
+    password = properties.get("kafka.sasl.password", "")
+    if (not username or not password) and "kafka.sasl.jaas.config" in properties:
+        jaas_username, jaas_password = _parse_jaas_plain_credentials(properties["kafka.sasl.jaas.config"])
+        username = username or jaas_username
+        password = password or jaas_password
+
+    has_credentials = bool(username or password)
+    if (mechanism or has_credentials) and not has_sasl:
+        raise ConfigError("SASL properties require kafka.security.protocol to use SASL")
+    if has_sasl and not mechanism:
+        raise ConfigError("kafka.sasl.mechanism is required for SASL security")
+    if mechanism and mechanism not in _SUPPORTED_SASL_MECHANISMS:
+        raise ConfigError("Unsupported kafka.sasl.mechanism")
+
+    if mechanism in _SASL_MECHANISMS_WITH_PLAIN_CREDENTIALS:
+        if not username or not password:
+            raise ConfigError("kafka.sasl.username and kafka.sasl.password are required for SASL credentials")
+        consumer_config["sasl_plain_username"] = username
+        consumer_config["sasl_plain_password"] = password
+    elif mechanism == "GSSAPI":
+        if not username:
+            raise ConfigError("kafka.sasl.username is required for GSSAPI")
+        consumer_config["sasl_kerberos_name"] = username
+        if password:
+            unsupported.append("kafka.sasl.password")
+    elif has_credentials:
+        unsupported.extend(name for name in ("kafka.sasl.username", "kafka.sasl.password") if properties.get(name))
+
+
+def _apply_ssl_configuration(
+    properties: dict[str, str],
+    consumer_config: dict[str, Any],
+    unsupported: list[str],
+) -> None:
+    endpoint_identification_algorithm = properties.get("kafka.ssl.endpoint.identification.algorithm")
+    if endpoint_identification_algorithm is not None:
+        _apply_endpoint_identification_algorithm(endpoint_identification_algorithm, consumer_config, properties)
+
+    truststore_location = properties.get("kafka.ssl.truststore.location", "").strip()
+    truststore_type = properties.get("kafka.ssl.truststore.type", "").strip()
+    truststore_password = properties.get("kafka.ssl.truststore.password", "")
+    truststore_alias = properties.get("kafka.ssl.truststore.cert.alias", "").strip() or None
+
+    if (truststore_password or truststore_type) and not truststore_location:
+        raise ConfigError("kafka.ssl.truststore.password and kafka.ssl.truststore.type require kafka.ssl.truststore.location")
+
+    if truststore_location:
+        truststore_path = _require_file("kafka.ssl.truststore.location", truststore_location)
+        resolved_truststore_type = _resolve_store_type(truststore_type, truststore_path)
+        if resolved_truststore_type == "PEM":
+            if truststore_password:
+                unsupported.append("kafka.ssl.truststore.password")
+            consumer_config["ssl_cafile"] = str(truststore_path)
+        elif resolved_truststore_type == "PKCS12":
+            ca_pem = _extract_pkcs12_truststore_pem(truststore_path, truststore_password)
+            consumer_config["ssl_cafile"] = _write_temp_ssl_file(ca_pem, "-truststore.pem")
+        elif resolved_truststore_type == "JKS":
+            ca_pem = _extract_jks_truststore_pem(truststore_path, truststore_password, truststore_alias)
+            consumer_config["ssl_cafile"] = _write_temp_ssl_file(ca_pem, "-truststore.pem")
+        else:
+            raise ConfigError("Unsupported kafka.ssl.truststore.type")
+
+    keystore_location = properties.get("kafka.ssl.keystore.location", "").strip()
+    keystore_type = properties.get("kafka.ssl.keystore.type", "").strip()
+    keystore_password = properties.get("kafka.ssl.keystore.password", "")
+    key_password = properties.get("kafka.ssl.key.password", properties.get("kafka.ssl.password", ""))
+    key_alias = properties.get("kafka.ssl.keystore.key.alias", "").strip() or None
+
+    if (keystore_password or keystore_type) and not keystore_location:
+        raise ConfigError("kafka.ssl.keystore.password and kafka.ssl.keystore.type require kafka.ssl.keystore.location")
+
+    if keystore_location:
+        keystore_path = _require_file("kafka.ssl.keystore.location", keystore_location)
+        resolved_keystore_type = _resolve_store_type(keystore_type, keystore_path)
+        if resolved_keystore_type == "PEM":
+            _apply_pem_keystore(keystore_path, properties, consumer_config, unsupported)
+        elif resolved_keystore_type == "PKCS12":
+            cert_pem, key_pem = _extract_pkcs12_keystore_pem(keystore_path, keystore_password, key_password)
+            consumer_config["ssl_certfile"] = _write_temp_ssl_file(cert_pem, "-cert.pem")
+            consumer_config["ssl_keyfile"] = _write_temp_ssl_file(key_pem, "-key.pem")
+            consumer_config.pop("ssl_password", None)
+        elif resolved_keystore_type == "JKS":
+            cert_pem, key_pem = _extract_jks_keystore_pem(keystore_path, keystore_password, key_password, key_alias)
+            consumer_config["ssl_certfile"] = _write_temp_ssl_file(cert_pem, "-cert.pem")
+            consumer_config["ssl_keyfile"] = _write_temp_ssl_file(key_pem, "-key.pem")
+            consumer_config.pop("ssl_password", None)
+        else:
+            raise ConfigError("Unsupported kafka.ssl.keystore.type")
+
+
+def _apply_endpoint_identification_algorithm(
+    raw_value: str,
+    consumer_config: dict[str, Any],
+    properties: dict[str, str],
+) -> None:
+    normalized = raw_value.strip().lower()
+    if normalized in {"", "none"}:
+        endpoint_value = False
+    elif normalized == "https":
+        endpoint_value = True
+    else:
+        raise ConfigError("Unsupported kafka.ssl.endpoint.identification.algorithm")
+
+    explicit_hostname_check = properties.get("kafka.ssl.check.hostname")
+    if explicit_hostname_check is not None:
+        configured_hostname_check = _convert_value("kafka.ssl.check.hostname", explicit_hostname_check)
+        if configured_hostname_check != endpoint_value:
+            raise ConfigError(
+                "kafka.ssl.check.hostname conflicts with kafka.ssl.endpoint.identification.algorithm"
+            )
+    consumer_config["ssl_check_hostname"] = endpoint_value
+
+
+def _apply_pem_keystore(
+    keystore_path: Path,
+    properties: dict[str, str],
+    consumer_config: dict[str, Any],
+    unsupported: list[str],
+) -> None:
+    key_location = properties.get("kafka.ssl.keystore.key.location", "").strip()
+    keyfile = _require_file("kafka.ssl.keystore.key.location", key_location) if key_location else None
+
+    consumer_config["ssl_certfile"] = str(keystore_path)
+    if keyfile is not None:
+        consumer_config["ssl_keyfile"] = str(keyfile)
+    elif "ssl_keyfile" not in consumer_config:
+        consumer_config["ssl_keyfile"] = str(keystore_path)
+
+    if properties.get("kafka.ssl.keystore.password"):
+        unsupported.append("kafka.ssl.keystore.password")
+
+
+def _parse_jaas_plain_credentials(value: str) -> tuple[str, str]:
+    username_match = re.search(r'username\s*=\s*"([^"]+)"', value)
+    password_match = re.search(r'password\s*=\s*"([^"]+)"', value)
+    if not username_match or not password_match:
+        return "", ""
+    return username_match.group(1), password_match.group(1)
+
+
+def _is_kafka_related_property(name: str) -> bool:
+    return (
+        name.startswith("kafka.")
+        or name.startswith("spring.kafka.")
+        or name in _JAVA_COMPATIBILITY_KEYS
+    )
+
+
+def _resolve_store_type(configured_store_type: str, location: Path) -> str:
+    if configured_store_type:
+        normalized = configured_store_type.strip().upper()
+        if normalized == "PFX":
+            return "PKCS12"
+        return normalized
+
+    suffix = location.suffix.lower()
+    if suffix == ".jks":
+        return "JKS"
+    if suffix in {".p12", ".pfx", ".pkcs12"}:
+        return "PKCS12"
+    return "PEM"
+
+
+def _extract_pkcs12_truststore_pem(path: Path, password: str) -> bytes:
+    try:
+        private_key, certificate, additional_certificates = pkcs12.load_key_and_certificates(
+            path.read_bytes(), password.encode("utf-8") if password else None
+        )
+    except Exception as exc:
+        raise ConfigError(
+            "Unable to parse kafka.ssl.truststore.location as PKCS12. Check truststore file and password."
+        ) from exc
+
+    certificates = []
+    if certificate is not None:
+        certificates.append(certificate)
+    certificates.extend(additional_certificates or [])
+
+    if not certificates:
+        raise ConfigError("PKCS12 truststore does not contain certificates")
+
+    return b"".join(certificate.public_bytes(serialization.Encoding.PEM) for certificate in certificates)
+
+
+def _extract_pkcs12_keystore_pem(path: Path, keystore_password: str, key_password: str) -> tuple[bytes, bytes]:
+    passwords_to_try = [keystore_password]
+    if key_password and key_password != keystore_password:
+        passwords_to_try.append(key_password)
+    if "" not in passwords_to_try:
+        passwords_to_try.append("")
+
+    last_error: Exception | None = None
+    for candidate in passwords_to_try:
+        try:
+            private_key, certificate, additional_certificates = pkcs12.load_key_and_certificates(
+                path.read_bytes(), candidate.encode("utf-8") if candidate else None
+            )
+        except Exception as exc:
+            last_error = exc
+            continue
+        if private_key is None or certificate is None:
+            raise ConfigError("PKCS12 keystore is missing private key or certificate")
+
+        certificate_chain = [certificate]
+        certificate_chain.extend(additional_certificates or [])
+        certificate_pem = b"".join(cert.public_bytes(serialization.Encoding.PEM) for cert in certificate_chain)
+        key_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        return certificate_pem, key_pem
+
+    raise ConfigError(
+        "Unable to parse kafka.ssl.keystore.location as PKCS12. Check keystore file and password."
+    ) from last_error
+
+
+def _extract_jks_truststore_pem(path: Path, password: str, alias: str | None) -> bytes:
+    converted_pkcs12 = _convert_jks_to_pkcs12(path, password, "", alias)
+    return _extract_pkcs12_truststore_pem(converted_pkcs12, _INTERMEDIATE_PKCS12_PASSWORD)
+
+
+def _extract_jks_keystore_pem(
+    path: Path,
+    keystore_password: str,
+    key_password: str,
+    alias: str | None,
+) -> tuple[bytes, bytes]:
+    converted_pkcs12 = _convert_jks_to_pkcs12(path, keystore_password, key_password, alias)
+    return _extract_pkcs12_keystore_pem(
+        converted_pkcs12,
+        _INTERMEDIATE_PKCS12_PASSWORD,
+        _INTERMEDIATE_PKCS12_PASSWORD,
+    )
+
+
+def _convert_jks_to_pkcs12(
+    source_path: Path,
+    store_password: str,
+    key_password: str,
+    alias: str | None,
+) -> Path:
+    destination_fd, destination_path = tempfile.mkstemp(prefix="kafka-viewer-jks-", suffix=".p12")
+    os.close(destination_fd)
+    _TEMP_SSL_FILES.add(destination_path)
+
+    command = [
+        "keytool",
+        "-importkeystore",
+        "-noprompt",
+        "-srckeystore",
+        str(source_path),
+        "-srcstoretype",
+        "JKS",
+        "-destkeystore",
+        destination_path,
+        "-deststoretype",
+        "PKCS12",
+        "-deststorepass",
+        _INTERMEDIATE_PKCS12_PASSWORD,
+    ]
+
+    if store_password:
+        command.extend(["-srcstorepass", store_password])
+    if key_password:
+        command.extend(["-srckeypass", key_password])
+    if alias:
+        command.extend(["-srcalias", alias])
+
+    try:
+        result = subprocess.run(command, check=False, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise ConfigError(
+            "JKS conversion requires the Java keytool executable on PATH"
+        ) from exc
+
+    if result.returncode != 0:
+        raise ConfigError(
+            "Unable to convert JKS store. Verify file format, alias, and provided passwords."
+        )
+
+    return Path(destination_path)
+
+
+def _require_file(property_name: str, path_value: str) -> Path:
+    path = Path(path_value)
+    if not path.is_file():
+        raise ConfigError(f"Invalid {property_name}: file does not exist")
+    return path
+
+
+def _write_temp_ssl_file(content: bytes, suffix: str) -> str:
+    fd, path = tempfile.mkstemp(prefix="kafka-viewer-", suffix=suffix)
+    with os.fdopen(fd, "wb") as temporary_file:
+        temporary_file.write(content)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    _TEMP_SSL_FILES.add(path)
+    return path
 
 
 def _convert_value(property_name: str, value: str) -> Any:

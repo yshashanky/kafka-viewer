@@ -224,6 +224,16 @@ def test_group_id_is_recognizable():
     assert generate_group_id().startswith("kafka-viewer-")
 
 
+def test_group_id_prefix_is_optional():
+    assert generate_group_id("").startswith("kafka-viewer-")
+
+
+def test_group_id_includes_prefix_when_provided():
+    generated = generate_group_id("payments-")
+
+    assert generated.startswith("payments-kafka-viewer-")
+
+
 @pytest.mark.parametrize("value", [0, -1, "nope"])
 def test_validate_count_rejects_invalid_values(value):
     with pytest.raises(ValueError, match="positive integer"):

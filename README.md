@@ -8,9 +8,9 @@
 pip install kafka-viewer
 ```
 
-## Configuration
+## Run
 
-Create a local Java-style `.properties` file named `kafka-viewer.properties`. The `--config` option is mandatory:
+`--config` is mandatory.
 
 ```bash
 kafka-viewer --config /path/to/kafka-viewer.properties
@@ -22,19 +22,106 @@ PowerShell:
 kafka-viewer --config C:\path\to\kafka-viewer.properties
 ```
 
-Kafka connection properties use the `kafka.` prefix. Schema Registry properties use the `schema.registry.` prefix. The topic and consumer group are selected in the UI; they are not required in the properties file. The application determines unsecured or secured Kafka from the configured Kafka properties.
+## Configuration model
 
-## Kafka security
+kafka-viewer uses one canonical naming convention:
 
-Java-style Kafka property names are mapped to the corresponding `kafka-python` consumer configuration names. Supported security protocols are `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, and `SASL_SSL`. The implemented SASL mechanisms are `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`, `GSSAPI`, and `OAUTHBEARER`; username/password mapping is provided for PLAIN and SCRAM, while GSSAPI uses the configured username as the Kerberos name.
+- Kafka connection and consumer properties: `kafka.*`
+- Schema Registry properties: `schema.registry.*`
+
+The parser also accepts selected Java/Spring-style aliases for compatibility (for example `bootstrap.servers`, `ssl.truststore.location`, `spring.kafka.properties.*`), then normalizes them into the canonical `kafka.*` format internally.
+
+Configuration flow:
+
+1. Parse `.properties`
+2. Normalize aliases to `kafka.*`
+3. Validate security/SSL/SASL requirements
+4. Translate only supported settings into `kafka-python` consumer config
+5. Report unsupported Kafka-related properties as warnings
+
+Unknown properties are never blindly passed through to `KafkaConsumer`.
+
+## Supported Kafka security and connection capabilities
+
+Supported protocols:
+
+- `PLAINTEXT`
+- `SSL`
+- `SASL_PLAINTEXT`
+- `SASL_SSL`
+
+Supported SASL mechanisms:
+
+- `PLAIN`
+- `SCRAM-SHA-256`
+- `SCRAM-SHA-512`
+- `GSSAPI`
+- `OAUTHBEARER`
+
+SASL credentials can be provided with either:
+
+- `kafka.sasl.username` + `kafka.sasl.password`
+- `kafka.sasl.jaas.config` (username/password are extracted for PLAIN/SCRAM)
+
+## SSL, truststore, and keystore support
+
+kafka-viewer supports both direct PEM paths and Java enterprise store formats.
+
+Truststore properties:
+
+- `kafka.ssl.truststore.location`
+- `kafka.ssl.truststore.type` (`PEM`, `JKS`, `PKCS12`/`PFX`; optional, inferred from extension if omitted)
+- `kafka.ssl.truststore.password` (used for JKS/PKCS12)
+- `kafka.ssl.truststore.cert.alias` (optional JKS alias)
+
+Keystore properties:
+
+- `kafka.ssl.keystore.location`
+- `kafka.ssl.keystore.type` (`PEM`, `JKS`, `PKCS12`/`PFX`; optional, inferred from extension if omitted)
+- `kafka.ssl.keystore.password` (used for JKS/PKCS12)
+- `kafka.ssl.key.password` (private key password or fallback decryption password)
+- `kafka.ssl.keystore.key.alias` (optional JKS key alias)
+- `kafka.ssl.keystore.key.location` (optional separate PEM key path)
+
+Additional SSL properties:
+
+- `kafka.ssl.endpoint.identification.algorithm` (`https` or `none`/empty)
+- `kafka.ssl.check.hostname`
+- `kafka.ssl.protocol`
+- `kafka.ssl.cipher.suites`
+- `kafka.ssl.cafile`
+- `kafka.ssl.certfile`
+- `kafka.ssl.keyfile`
+- `kafka.ssl.password`
+- `kafka.ssl.crlfile`
+
+For JKS/PKCS12 stores, kafka-viewer securely converts certificate and key material into short-lived local files for `kafka-python`. JKS conversion uses the Java `keytool` executable (must be available on `PATH`). Passwords and private key contents are never printed.
+
+## Configuration examples
 
 Unsecured Kafka:
 
 ```properties
 kafka.bootstrap.servers=localhost:9092
+kafka.security.protocol=PLAINTEXT
 ```
 
-SASL/SSL with placeholder credentials:
+SSL with truststore and PKCS12 keystore:
+
+```properties
+kafka.bootstrap.servers=localhost:9093
+kafka.security.protocol=SSL
+kafka.ssl.truststore.location=/path/to/truststore.jks
+kafka.ssl.truststore.type=JKS
+kafka.ssl.truststore.password=YOUR_TRUSTSTORE_PASSWORD
+kafka.ssl.keystore.location=/path/to/client.p12
+kafka.ssl.keystore.type=PKCS12
+kafka.ssl.keystore.password=YOUR_KEYSTORE_PASSWORD
+kafka.ssl.key.password=YOUR_KEY_PASSWORD
+kafka.ssl.endpoint.identification.algorithm=https
+```
+
+SASL_SSL with PLAIN:
 
 ```properties
 kafka.bootstrap.servers=localhost:9093
@@ -42,56 +129,64 @@ kafka.security.protocol=SASL_SSL
 kafka.sasl.mechanism=PLAIN
 kafka.sasl.username=YOUR_USERNAME
 kafka.sasl.password=YOUR_PASSWORD
+kafka.ssl.truststore.location=/path/to/ca.pem
+kafka.ssl.truststore.type=PEM
 ```
 
-Only supported `kafka.*` properties are passed to `kafka-python`. Unsupported Kafka properties are reported rather than silently passed through. `kafka.bootstrap.servers` is required.
+SASL_SSL with JAAS-style credentials:
+
+```properties
+kafka.bootstrap.servers=localhost:9093
+kafka.security.protocol=SASL_SSL
+kafka.sasl.mechanism=SCRAM-SHA-512
+kafka.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="YOUR_USERNAME" password="YOUR_PASSWORD";
+```
 
 ## Schema Registry / Confluent Avro
 
-Schema Registry support is optional. Without `schema.registry.url`, the existing Kafka value handling is used. When it is configured, kafka-viewer attempts Confluent Avro deserialization. The deserializer reads the Schema ID from the Confluent Avro payload and retrieves the corresponding schema; users do not configure a schema ID, version, or subject. The topic continues to be selected through the existing UI.
+Schema Registry support is optional.
 
-Unauthenticated Schema Registry:
+- If `schema.registry.url` is missing, kafka-viewer uses raw/string/JSON value display behavior.
+- If configured, kafka-viewer attempts Confluent Avro deserialization.
+- Schema Registry config stays separate from Kafka consumer config and is never passed to `KafkaConsumer`.
 
-```properties
-schema.registry.url=https://schema-registry.example.com
-```
-
-Optional Schema Registry Basic Authentication:
+Schema Registry example:
 
 ```properties
 schema.registry.url=https://schema-registry.example.com
 schema.registry.basic.auth.user.info=YOUR_USERNAME:YOUR_PASSWORD
 ```
 
-Schema Registry authentication is used only when the authentication property is provided. Schema Registry properties are handled separately and are never passed to `KafkaConsumer`.
+Avro failures are non-fatal: kafka-viewer continues processing messages and shows bounded safe raw payload + safe error text for failed records.
 
-If Avro deserialization fails, the Kafka message is not discarded. The UI continues to show its metadata, a failure indication, a safe bounded raw-payload representation, and a safe error message. This distinguishes messages that did not arrive from messages that arrived but could not be decoded.
+## UI consumer group generation
 
-The UI lets you check Kafka connection status, discover and select topics, enter or generate a temporary consumer group ID, and load:
+The UI supports:
 
-- The latest N messages.
-- Messages from the beginning.
-- Messages from a date/time.
-- Messages within a date/time range.
+- Manual consumer group entry
+- Optional prefix input (`Group ID Prefix`)
+- `Generate Temporary Group ID`
 
-Multiple Kafka partitions are supported. All reads have a bounded message count. Loaded messages show the partition, offset, timestamp, key, and message value. Messages can be expanded to view the complete message value, including formatted JSON when applicable.
+If the prefix is empty, existing generation behavior is unchanged. If a prefix is set, the generated value is `prefix + generated-id`.
 
 ## Offset behavior
 
 kafka-viewer is intended for inspection. It does not commit consumer offsets or modify existing consumer-group progress.
 
-## Safe configuration
+## Safety guidance
 
-Keep real `.properties` files containing credentials out of source control. Use `kafka-viewer.properties.example` as a template only, and never paste credentials into documentation.
+Keep real `.properties` files containing credentials out of source control. Use `kafka-viewer.properties.example` as a template only.
 
 ## Limitations
 
-The implementation supports the Kafka security protocols and SASL mechanisms listed above, plus optional Confluent Avro deserialization. It does not support:
+This release provides broad practical connection/security compatibility for Kafka/Java/Spring-style deployment concepts, but not full parity with every Java client property.
 
-- Protobuf.
-- Publishing messages.
-- Topic or consumer-group administration.
-- Multiple Kafka clusters.
+Not supported:
+
+- Protobuf deserialization
+- Publishing messages
+- Topic or consumer-group administration
+- Arbitrary non-Kafka Java library properties
 
 ## Development
 
