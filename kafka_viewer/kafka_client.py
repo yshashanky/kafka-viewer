@@ -32,8 +32,8 @@ def validate_count(value: Any) -> int:
     return count
 
 
-def generate_group_id() -> str:
-    return f"kafka-viewer-{uuid.uuid4().hex[:12]}"
+def generate_group_id(prefix: str = "") -> str:
+    return f"{prefix}kafka-viewer-{uuid.uuid4().hex[:12]}"
 
 
 def _readable(value: Any) -> str:
