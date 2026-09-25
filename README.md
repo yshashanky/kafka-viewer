@@ -203,6 +203,18 @@ The UI supports:
 
 If the prefix is empty, existing generation behavior is unchanged. If a prefix is set, the generated value is `prefix + generated-id`.
 
+## Topic Statistics
+
+The dashboard includes a read-only Topic Statistics section for the selected topic. It reports:
+
+- **Total Records**: records currently retained, calculated as the sum of each partition's end offset minus beginning offset. This is not the lifetime number of records ever published.
+- **Published Today**: records whose Kafka timestamps fall from local midnight through the start of the next local day.
+- **Last 1 Hour**: records whose Kafka timestamps fall within the previous hour, including the boundary.
+- **Latest Record**: the newest Kafka record timestamp currently retained.
+- **Partitions**: the selected topic's partition count.
+
+Use **Refresh Statistics** to obtain fresh values without clearing loaded messages, filters, or loading controls. The refresh time is shown separately from the latest record timestamp. Offset-based totals do not consume the topic; timestamp metrics use Kafka timestamp-to-offset lookup and inspect only the final retained record in each non-empty partition. If Kafka cannot provide timestamp information, those metrics are shown as unavailable while retained totals remain available. Displayed times use the machine's local timezone.
+
 ## Offset behavior
 
 kafka-viewer is intended for inspection. It does not commit consumer offsets or modify existing consumer-group progress.
