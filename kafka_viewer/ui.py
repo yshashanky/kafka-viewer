@@ -17,6 +17,18 @@ from kafka_viewer.kafka_client import (
     validate_count,
 )
 
+BROKER_DISPLAY_MAX_LENGTH = 96
+
+
+def truncate_broker_display(value: str | None, max_length: int = BROKER_DISPLAY_MAX_LENGTH) -> str:
+    if value is None:
+        return ""
+    if len(value) <= max_length:
+        return value
+    if max_length <= 3:
+        return "." * max_length
+    return f"{value[:max_length - 3]}..."
+
 
 def _config_path() -> str:
     parser = argparse.ArgumentParser(add_help=False)
@@ -51,7 +63,7 @@ def main() -> None:
     for property_name in unsupported:
         st.warning(f"Unsupported Kafka property ignored: {property_name}")
     bootstrap_servers = properties["kafka.bootstrap.servers"]
-    st.write(f"Broker: `{bootstrap_servers}`")
+    st.write(f"Broker: `{truncate_broker_display(bootstrap_servers)}`")
     try:
         client = KafkaClient(consumer_config, schema_registry_config)
     except Exception:
@@ -69,10 +81,9 @@ def main() -> None:
             st.session_state.connection_error = str(exc)
 
     status = st.session_state.connection_status
-    st.subheader(f"Status: {status}")
-    if status == "Disconnected":
-        st.error(f"Kafka connection failed: {st.session_state.get('connection_error', 'unknown error')}")
-    if st.button("Test / Refresh Connection"):
+    status_col, connection_col, topics_col = st.columns([2, 1, 1])
+    status_col.subheader(f"Status: {status}")
+    if connection_col.button("Test / Refresh Connection"):
         try:
             st.session_state.topics = sorted(client.topics())
             st.session_state.connection_status = "Connected"
@@ -81,58 +92,64 @@ def main() -> None:
             st.session_state.connection_status = "Disconnected"
             st.session_state.connection_error = str(exc)
         st.rerun()
-    if status != "Connected":
-        return
-
-    topics = st.session_state.get("topics") or []
-    if st.button("Refresh Topics"):
+    if topics_col.button("Refresh Topic"):
         try:
             st.session_state.topics = sorted(client.topics())
         except Exception as exc:
             st.error(f"Unable to discover topics: {exc}")
         st.rerun()
+    if status == "Disconnected":
+        st.error(f"Kafka connection failed: {st.session_state.get('connection_error', 'unknown error')}")
+    if status != "Connected":
+        return
+
+    topics = st.session_state.get("topics") or []
     if not topics:
         st.info("No topics are available.")
         return
 
-    topic = st.selectbox("Topic", topics)
-    with st.container():
-        left_col, right_col = st.columns([1.3, 1.2])
-        with left_col:
-            group_id = st.text_input("Consumer group ID", value=st.session_state.get("group_id", ""))
-        with right_col:
-            group_prefix = st.text_input("Group ID Prefix (optional)", value=st.session_state.get("group_id_prefix", ""))
-    if st.button("Generate Temporary Group ID"):
+    topic_col, group_id_col = st.columns(2)
+    topic = topic_col.selectbox("Topic", topics)
+    group_id = group_id_col.text_input("Consumer group ID", value=st.session_state.get("group_id", ""))
+    prefix_col, generate_col = st.columns(2)
+    group_prefix = prefix_col.text_input("Group ID Prefix (optional)", value=st.session_state.get("group_id_prefix", ""))
+    if generate_col.button("Generate Temporary Group ID", use_container_width=True):
         st.session_state.group_id_prefix = group_prefix
         st.session_state.group_id = generate_group_id(group_prefix)
         st.rerun()
     group_id = st.session_state.get("group_id", group_id)
     modes = {"Latest messages": "latest", "From beginning": "beginning", "From date/time": "from_date", "Date/time range": "range"}
-    mode_label = st.radio("Loading mode", list(modes), index=0)
+    mode_label = st.radio("Loading mode", list(modes), index=0, horizontal=True)
     mode = modes[mode_label]
-    filter_text = st.text_input(
-        "Message content filter (optional)",
+    start = end = None
+    if mode == "from_date":
+        start_date_col, start_time_col = st.columns(2)
+        selected_date = start_date_col.date_input("Start Date", key="start-date")
+        selected_time = start_time_col.time_input("Start Date Time", value=time(0, 0), key="start-time")
+        start = datetime.combine(selected_date, selected_time)
+    elif mode == "range":
+        start_date_col, start_time_col, end_date_col, end_time_col = st.columns(4)
+        start_date = start_date_col.date_input("Start Date", key="range-start-date")
+        start_time = start_time_col.time_input("Start Date Time", value=time(0, 0), key="range-start-time")
+        end_date = end_date_col.date_input("End Date", key="range-end-date")
+        end_time = end_time_col.time_input("End Date Time", value=time(0, 0), key="range-end-time")
+        start = datetime.combine(start_date, start_time)
+        end = datetime.combine(end_date, end_time)
+
+    count_col, filter_col = st.columns(2)
+    count_label = "Message count" if mode == "latest" else "Maximum message count"
+    count = count_col.number_input(count_label, min_value=1, value=100, step=1)
+    filter_text = filter_col.text_input(
+        "Message Filter (optional)",
         value=st.session_state.get("message_filter", ""),
         placeholder="e.g. error, status, \"ready\"",
     )
     st.session_state.message_filter = filter_text
-    start = end = None
-    if mode == "latest":
-        count = st.number_input("Message count", min_value=1, value=100, step=1)
-    elif mode == "beginning":
-        count = st.number_input("Maximum message count", min_value=1, value=100, step=1)
-    elif mode == "from_date":
-        start = _date_time("Start date", "start")
-        count = st.number_input("Maximum message count", min_value=1, value=100, step=1)
-    else:
-        start = _date_time("Start date", "range-start")
-        end = _date_time("End date", "range-end")
-        count = st.number_input("Maximum message count", min_value=1, value=100, step=1)
 
     if filter_text.strip():
         st.caption("Filter-aware scans stop after 5,000 inspected records to keep loading responsive.")
 
-    load_col, clear_col = st.columns(2)
+    load_col, clear_col, refresh_statistics_col = st.columns(3)
     if load_col.button("Load Messages", type="primary"):
         try:
             validate_count(count)
@@ -148,7 +165,7 @@ def main() -> None:
         st.session_state.topic_statistics_topic = topic
 
     st.subheader("Topic Statistics")
-    refresh_statistics = st.button("Refresh Statistics")
+    refresh_statistics = refresh_statistics_col.button("Refresh Statistics")
     if refresh_statistics or "topic_statistics" not in st.session_state:
         try:
             st.session_state.topic_statistics = client.get_topic_statistics(topic)
@@ -162,16 +179,15 @@ def main() -> None:
     if statistics is None:
         st.info("Select a connected Kafka topic to view statistics.")
     else:
-        metric_columns = st.columns(3)
+        metric_columns = st.columns(5)
         metric_columns[0].metric("Total Records", statistics.total_records)
         metric_columns[1].metric("Published Today", statistics.published_today if statistics.published_today is not None else "Unavailable")
         metric_columns[2].metric("Last 1 Hour", statistics.published_last_hour if statistics.published_last_hour is not None else "Unavailable")
-        metric_columns = st.columns(2)
+        metric_columns[3].metric("Partitions", statistics.partitions)
         latest_value = "No records" if statistics.latest_timestamp is None and statistics.total_records == 0 else (
             "Unavailable" if statistics.latest_timestamp is None else datetime.fromtimestamp(statistics.latest_timestamp / 1000, timezone.utc).astimezone().strftime("%d-%b-%Y %H:%M:%S")
         )
-        metric_columns[0].metric("Latest Record", latest_value)
-        metric_columns[1].metric("Partitions", statistics.partitions)
+        metric_columns[4].metric("Latest Record Timestamp", latest_value)
         if statistics.timestamp_error:
             st.warning(statistics.timestamp_error)
         refreshed_at = st.session_state.get("topic_statistics_refreshed_at")
@@ -190,18 +206,13 @@ def main() -> None:
             st.caption(f"Scanned {metadata.get('scanned', 0)} record(s) matching the filter.")
     json_payload = json.dumps(export_messages(messages), ensure_ascii=False, indent=2)
     st.download_button(
-        "Download JSON",
+        "Download Messages as JSON",
         data=json_payload,
         file_name=f"{topic}-messages.json",
         mime="application/json",
         use_container_width=True,
     )
-    st.dataframe(
-        [{"Partition": message.partition, "Offset": message.offset, "Timestamp": message.timestamp, "Key": format_key(message.key), "Message preview": format_message_value(message)[:500]} for message in messages],
-        use_container_width=True,
-        hide_index=True,
-    )
-    st.subheader("Message details")
+    st.subheader("Message Details")
     for index, message in enumerate(messages, 1):
         with st.expander(f"#{index} partition={message.partition} offset={message.offset}"):
             st.write({"Partition": message.partition, "Offset": message.offset, "Timestamp": message.timestamp, "Key": format_key(message.key)})
