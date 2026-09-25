@@ -108,6 +108,13 @@ _SUPPORTED_SECURITY_PROTOCOLS = {"PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL
 
 SCHEMA_REGISTRY_URL = "schema.registry.url"
 SCHEMA_REGISTRY_AUTH = "schema.registry.basic.auth.user.info"
+SCHEMA_REGISTRY_VERIFY = "schema.registry.ssl.verify"
+SCHEMA_REGISTRY_CA = "schema.registry.ssl.ca.location"
+SCHEMA_REGISTRY_NO_REVOKE = "schema.registry.ssl.no.revoke"
+SCHEMA_REGISTRY_CLIENT_CERT = "schema.registry.ssl.certificate.location"
+SCHEMA_REGISTRY_CLIENT_KEY = "schema.registry.ssl.key.location"
+SCHEMA_REGISTRY_CLIENT_KEY_PASSWORD = "schema.registry.ssl.key.password"
+SCHEMA_REGISTRY_LEGACY_VERIFY = "schema.registry.ssl.certificate.verification"
 
 _DIRECT_ALIASES = {
     "bootstrap.servers": "kafka.bootstrap.servers",
@@ -211,18 +218,84 @@ def build_consumer_config(properties: dict[str, str]) -> tuple[dict[str, Any], l
 
 
 def build_schema_registry_config(properties: dict[str, str]) -> dict[str, str] | None:
+    schema_properties = [
+        key
+        for key in properties
+        if key.startswith("schema.registry.") and key not in {SCHEMA_REGISTRY_URL, SCHEMA_REGISTRY_AUTH}
+    ]
+
     url = properties.get(SCHEMA_REGISTRY_URL, "").strip()
     auth = properties.get(SCHEMA_REGISTRY_AUTH, "")
+    legacy_verify = properties.get(SCHEMA_REGISTRY_LEGACY_VERIFY, "").strip()
+    if legacy_verify and SCHEMA_REGISTRY_VERIFY in properties:
+        raise ConfigError("Use only one Schema Registry TLS verification property: schema.registry.ssl.verify")
+    if legacy_verify:
+        properties[SCHEMA_REGISTRY_VERIFY] = legacy_verify
+
     if not url:
-        if auth:
-            raise ConfigError("schema.registry.basic.auth.user.info requires schema.registry.url")
+        if auth or schema_properties:
+            raise ConfigError("Schema Registry configuration requires schema.registry.url")
         return None
+
     if auth and (":" not in auth or not all(auth.split(":", 1))):
         raise ConfigError("Invalid schema registry authentication configuration")
-    config = {"url": url}
+
+    config: dict[str, str | bool] = {"url": url}
     if auth:
         config["basic.auth.user.info"] = auth
-    return config
+
+    verify_value = properties.get(SCHEMA_REGISTRY_VERIFY, "").strip()
+    if verify_value:
+        normalized = verify_value.lower()
+        if normalized not in {"true", "false"}:
+            raise ConfigError("Invalid value for schema.registry.ssl.verify; expected true or false")
+        if normalized == "false":
+            config["ssl.ca.location"] = False
+
+    ca_location = properties.get(SCHEMA_REGISTRY_CA, "").strip()
+    if ca_location:
+        ca_path = _require_file(SCHEMA_REGISTRY_CA, ca_location)
+        if not os.access(ca_path, os.R_OK):
+            raise ConfigError(f"Unable to read {SCHEMA_REGISTRY_CA}: file is not readable")
+        config["ssl.ca.location"] = str(ca_path)
+
+    no_revoke_value = properties.get(SCHEMA_REGISTRY_NO_REVOKE, "").strip()
+    if no_revoke_value:
+        normalized = no_revoke_value.lower()
+        if normalized not in {"true", "false"}:
+            raise ConfigError("Invalid value for schema.registry.ssl.no.revoke; expected true or false")
+        if normalized == "true":
+            raise ConfigError(
+                "schema.registry.ssl.no.revoke=true is not supported by the installed "
+                "confluent-kafka/Python SSL stack; use schema.registry.ssl.verify=false "
+                "to intentionally disable Schema Registry certificate verification."
+            )
+
+    client_cert_location = properties.get(SCHEMA_REGISTRY_CLIENT_CERT, "").strip()
+    if client_cert_location:
+        config["ssl.certificate.location"] = str(_require_file(SCHEMA_REGISTRY_CLIENT_CERT, client_cert_location))
+
+    client_key_location = properties.get(SCHEMA_REGISTRY_CLIENT_KEY, "").strip()
+    if client_key_location:
+        key_path = _require_file(SCHEMA_REGISTRY_CLIENT_KEY, client_key_location)
+        config["ssl.key.location"] = str(key_path)
+
+    client_key_password = properties.get(SCHEMA_REGISTRY_CLIENT_KEY_PASSWORD, "").strip()
+    if client_key_password:
+        if not client_cert_location and not client_key_location:
+            raise ConfigError(
+                "schema.registry.ssl.key.password requires schema.registry.ssl.certificate.location "
+                "and/or schema.registry.ssl.key.location"
+            )
+        config["ssl.key.password"] = client_key_password
+
+    if (client_key_location or client_key_password) and not client_cert_location:
+        raise ConfigError(
+            "schema.registry.ssl.certificate.location is required when configuring "
+            "schema.registry.ssl.key.location or schema.registry.ssl.key.password"
+        )
+
+    return dict(config)
 
 
 def _canonical_property_name(name: str) -> str | None:

@@ -381,6 +381,129 @@ def test_schema_registry_auth_rejects_malformed_value():
         )
 
 
+def test_schema_registry_https_url_with_default_verify_is_supported():
+    config = build_schema_registry_config({"schema.registry.url": "https://registry.example:8082"})
+    assert config == {"url": "https://registry.example:8082"}
+
+
+def test_schema_registry_http_url_without_auth_is_supported():
+    config = build_schema_registry_config({"schema.registry.url": "http://registry.example:8081"})
+    assert config == {"url": "http://registry.example:8081"}
+
+
+def test_schema_registry_custom_ca_path_is_supported(tmp_path):
+    ca_file = tmp_path / "ca.pem"
+    ca_file.write_text("-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n", encoding="utf-8")
+
+    config = build_schema_registry_config(
+        {
+            "schema.registry.url": "https://registry.example:8082",
+            "schema.registry.ssl.ca.location": str(ca_file),
+        }
+    )
+
+    assert config["url"] == "https://registry.example:8082"
+    assert config["ssl.ca.location"] == str(ca_file)
+
+
+def test_schema_registry_verify_false_disables_tls_verification():
+    config = build_schema_registry_config(
+        {
+            "schema.registry.url": "https://registry.example:8082",
+            "schema.registry.ssl.verify": "false",
+        }
+    )
+
+    assert config["ssl.ca.location"] is False
+
+
+def test_schema_registry_verify_true_is_validated_and_kept_explicit():
+    config = build_schema_registry_config(
+        {
+            "schema.registry.url": "https://registry.example:8082",
+            "schema.registry.ssl.verify": "true",
+        }
+    )
+
+    assert config["url"] == "https://registry.example:8082"
+
+
+def test_schema_registry_invalid_verify_value_raises_clear_error():
+    with pytest.raises(ConfigError, match="schema.registry.ssl.verify"):
+        build_schema_registry_config(
+            {
+                "schema.registry.url": "https://registry.example:8082",
+                "schema.registry.ssl.verify": "maybe",
+            }
+        )
+
+
+def test_schema_registry_no_revoke_false_is_accepted():
+    config = build_schema_registry_config(
+        {
+            "schema.registry.url": "https://registry.example:8082",
+            "schema.registry.ssl.no.revoke": "false",
+        }
+    )
+
+    assert config["url"] == "https://registry.example:8082"
+
+
+def test_schema_registry_no_revoke_true_is_not_supported_in_python_stack():
+    with pytest.raises(ConfigError, match="schema.registry.ssl.no.revoke"):
+        build_schema_registry_config(
+            {
+                "schema.registry.url": "https://registry.example:8082",
+                "schema.registry.ssl.no.revoke": "true",
+            }
+        )
+
+
+def test_schema_registry_missing_ca_file_raises_clear_error(tmp_path):
+    missing = tmp_path / "missing-ca.pem"
+    with pytest.raises(ConfigError, match="schema.registry.ssl.ca.location"):
+        build_schema_registry_config(
+            {
+                "schema.registry.url": "https://registry.example:8082",
+                "schema.registry.ssl.ca.location": str(missing),
+            }
+        )
+
+
+def test_schema_registry_client_cert_and_key_are_preserved(tmp_path):
+    cert = tmp_path / "client-cert.pem"
+    key = tmp_path / "client-key.pem"
+    cert.write_text("-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n", encoding="utf-8")
+    key.write_text("-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n", encoding="utf-8")
+
+    config = build_schema_registry_config(
+        {
+            "schema.registry.url": "https://registry.example:8082",
+            "schema.registry.ssl.certificate.location": str(cert),
+            "schema.registry.ssl.key.location": str(key),
+            "schema.registry.ssl.key.password": "key-password",
+        }
+    )
+
+    assert config["ssl.certificate.location"] == str(cert)
+    assert config["ssl.key.location"] == str(key)
+    assert config["ssl.key.password"] == "key-password"
+
+
+def test_schema_registry_properties_do_not_leak_into_kafka_consumer_config():
+    consumer_config, _ = build_consumer_config(
+        {
+            "kafka.bootstrap.servers": "broker:9092",
+            "schema.registry.url": "https://registry.example:8082",
+            "schema.registry.ssl.verify": "false",
+            "schema.registry.basic.auth.user.info": "user:pass",
+        }
+    )
+
+    assert all(not key.startswith("schema.registry") for key in consumer_config)
+    assert consumer_config["bootstrap_servers"] == "broker:9092"
+
+
 def test_extract_pkcs12_keystore_error_does_not_expose_password(tmp_path):
     keystore = tmp_path / "keystore.p12"
     keystore.write_bytes(b"invalid")

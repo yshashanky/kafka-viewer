@@ -87,5 +87,26 @@ kafka.ssl.check.hostname=true
 # ============================================================
 # Schema Registry / Confluent Avro (optional)
 # ============================================================
-# schema.registry.url=https://schema-registry.example.com
+# The URL is optional. If omitted, kafka-viewer falls back to raw/string/JSON display.
+# HTTPS is supported without Basic Authentication when the server certificate is trusted.
+# HTTP is also supported without authentication unless you explicitly configure it.
+# schema.registry.url=https://schema-registry.company.com:8082
+
+# Optional - custom CA for private/internal certificate authorities.
+# schema.registry.ssl.ca.location=C:\path\to\company-ca.pem
+
+# Optional - certificate verification. Default is true.
+# schema.registry.ssl.verify=true
+# schema.registry.ssl.verify=false
+
+# Optional - compatibility property only. The current Python/Confluent stack does not expose an equivalent
+# revocation control mechanism for ssl.no.revoke, so this is accepted as a compatibility setting only when false.
+# schema.registry.ssl.no.revoke=false
+
+# Optional - Basic Authentication is independent of HTTPS and remains optional.
 # schema.registry.basic.auth.user.info=YOUR_USERNAME:YOUR_PASSWORD
+
+# Optional - Schema Registry client certificate / private key (if used)
+# schema.registry.ssl.certificate.location=C:\path\to\client-cert.pem
+# schema.registry.ssl.key.location=C:\path\to\client-key.pem
+# schema.registry.ssl.key.password=YOUR_KEY_PASSWORD
