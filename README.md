@@ -2,6 +2,8 @@
 
 `kafka-viewer` is a lightweight local Streamlit UI for reading Kafka messages for inspection. Kafka connection details come from a local properties file. Consumer offsets are not committed or modified.
 
+Snappy-compressed Kafka records are supported through the normal `kafka-viewer` installation; no separate compression package installation is required.
+
 ## Installation
 
 ```bash
@@ -210,7 +212,7 @@ The dashboard includes a read-only Topic Statistics section for the selected top
 - **Total Records**: records currently retained, calculated as the sum of each partition's end offset minus beginning offset. This is not the lifetime number of records ever published.
 - **Published Today**: records whose Kafka timestamps fall from local midnight through the start of the next local day.
 - **Last 1 Hour**: records whose Kafka timestamps fall within the previous hour, including the boundary.
-- **Latest Record**: the newest Kafka record timestamp currently retained.
+- **Latest Record Timestamp**: the newest Kafka record timestamp currently retained.
 - **Partitions**: the selected topic's partition count.
 
 Use **Refresh Statistics** to obtain fresh values without clearing loaded messages, filters, or loading controls. The refresh time is shown separately from the latest record timestamp. Offset-based totals do not consume the topic; timestamp metrics use Kafka timestamp-to-offset lookup and inspect only the final retained record in each non-empty partition. If Kafka cannot provide timestamp information, those metrics are shown as unavailable while retained totals remain available. Displayed times use the machine's local timezone.
