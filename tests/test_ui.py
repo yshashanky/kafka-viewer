@@ -1,5 +1,5 @@
 from kafka_viewer.config import build_consumer_config
-from kafka_viewer.ui import truncate_broker_display
+from kafka_viewer.ui import LOAD_BUTTON_COLOR, REFRESH_STATISTICS_COLOR, truncate_broker_display
 
 
 def test_short_broker_display_is_unchanged():
@@ -36,3 +36,8 @@ def test_truncation_does_not_change_underlying_consumer_broker_value():
 def test_empty_broker_display_is_safe():
     assert truncate_broker_display("") == ""
     assert truncate_broker_display(None) == ""
+
+
+def test_action_button_colors_match_requested_palette():
+    assert LOAD_BUTTON_COLOR == "#86EFAC"
+    assert REFRESH_STATISTICS_COLOR == "#93C5FD"

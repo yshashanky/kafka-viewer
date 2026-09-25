@@ -217,6 +217,8 @@ The dashboard includes a read-only Topic Statistics section for the selected top
 
 Use **Refresh Statistics** to obtain fresh values without clearing loaded messages, filters, or loading controls. The refresh time is shown separately from the latest record timestamp. Offset-based totals do not consume the topic; timestamp metrics use Kafka timestamp-to-offset lookup and inspect only the final retained record in each non-empty partition. If Kafka cannot provide timestamp information, those metrics are shown as unavailable while retained totals remain available. Displayed times use the machine's local timezone.
 
+When a message filter is used with Latest mode, kafka-viewer scans partition-local latest regions and returns the newest matching records across the topic. Kafka record timestamps determine cross-partition recency; partition and offset provide deterministic tie-breaking. The global filter scan cap remains 5,000 records.
+
 ## Offset behavior
 
 kafka-viewer is intended for inspection. It does not commit consumer offsets or modify existing consumer-group progress.

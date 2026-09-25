@@ -261,15 +261,100 @@ class KafkaClient:
         partitions: list[TopicPartition],
         end_offsets: dict[TopicPartition, int],
     ) -> int | None:
+        latest_records = self._latest_retained_records(consumer, partitions, end_offsets)
+        timestamps = [record.timestamp for record in latest_records if record.timestamp is not None]
+        return max(timestamps) if timestamps else None
+
+    def _latest_retained_records(
+        self,
+        consumer: Any,
+        partitions: list[TopicPartition],
+        end_offsets: dict[TopicPartition, int],
+    ) -> list[Any]:
         latest_partitions = [partition for partition in partitions if end_offsets[partition] > 0]
         if not latest_partitions:
-            return None
+            return []
         consumer.assign(latest_partitions)
         for partition in latest_partitions:
             consumer.seek(partition, end_offsets[partition] - 1)
-        batch = consumer.poll(timeout_ms=1000)
-        timestamps = [record.timestamp for record in _records(batch) if record.timestamp is not None]
-        return max(timestamps) if timestamps else None
+
+        records: dict[TopicPartition, Any] = {}
+        active = set(latest_partitions)
+        idle_polls = 0
+        while active:
+            batch = consumer.poll(timeout_ms=1000)
+            if not batch:
+                idle_polls += 1
+                if idle_polls >= 2:
+                    break
+                continue
+            idle_polls = 0
+            for record in _records(batch):
+                partition = TopicPartition(record.topic, record.partition)
+                if partition in active and record.offset == end_offsets[partition] - 1:
+                    records[partition] = record
+                    active.discard(partition)
+            for partition in list(active):
+                if consumer.position(partition) >= end_offsets[partition]:
+                    active.discard(partition)
+        return [records[partition] for partition in latest_partitions if partition in records]
+
+    def _load_latest_messages_with_filter(
+        self,
+        consumer: Any,
+        partitions: list[TopicPartition],
+        beginning_offsets: dict[TopicPartition, int],
+        end_offsets: dict[TopicPartition, int],
+        count: int,
+        filter_text: str,
+    ) -> list[Message]:
+        window_size = max(1, min(100, count))
+        scan_ends = dict(end_offsets)
+        matches: list[Message] = []
+        while scan_ends and self.last_scan_metadata["scanned"] < FILTER_SCAN_CAP:
+            windows = {
+                partition: (max(beginning_offsets[partition], scan_ends[partition] - window_size), scan_ends[partition])
+                for partition in scan_ends
+                if scan_ends[partition] > beginning_offsets[partition]
+            }
+            if not windows:
+                break
+            active = set(windows)
+            consumer.assign(list(active))
+            for partition, (window_start, _) in windows.items():
+                consumer.seek(partition, window_start)
+            idle_polls = 0
+            while active and self.last_scan_metadata["scanned"] < FILTER_SCAN_CAP:
+                batch = consumer.poll(timeout_ms=1000)
+                if not batch:
+                    idle_polls += 1
+                    if idle_polls >= 2:
+                        break
+                    continue
+                idle_polls = 0
+                for record in _records(batch):
+                    partition = TopicPartition(record.topic, record.partition)
+                    window = windows.get(partition)
+                    if window is None or not (window[0] <= record.offset < window[1]):
+                        continue
+                    self.last_scan_metadata["scanned"] += 1
+                    message = self._message(record, record.timestamp)
+                    if message_matches_filter(message, filter_text):
+                        matches.append(message)
+                    if self.last_scan_metadata["scanned"] >= FILTER_SCAN_CAP:
+                        self.last_scan_metadata["cap_reached"] = True
+                        break
+                if self.last_scan_metadata["scanned"] >= FILTER_SCAN_CAP:
+                    break
+                for partition in list(active):
+                    if consumer.position(partition) >= windows[partition][1]:
+                        active.discard(partition)
+            for partition, (window_start, _) in windows.items():
+                scan_ends[partition] = window_start
+            scan_ends = {partition: end for partition, end in scan_ends.items() if end > beginning_offsets[partition]}
+
+        matches.sort(key=lambda item: (item.timestamp if item.timestamp is not None else -1, item.partition, item.offset))
+        return matches[-count:]
 
     def load_messages(
         self,
@@ -392,59 +477,15 @@ class KafkaClient:
                 return []
             end_offsets = consumer.end_offsets(partitions)
             if mode == "latest":
-                matches: list[Message] = []
-                window_size = max(1, min(100, count))
-                window_ends = dict(end_offsets)
-                while len(matches) < count and self.last_scan_metadata["scanned"] < FILTER_SCAN_CAP:
-                    window_starts = {
-                        partition: max(0, window_ends[partition] - window_size)
-                        for partition in partitions
-                        if window_ends[partition] > 0
-                    }
-                    active = {partition for partition, offset in window_starts.items() if offset < window_ends[partition]}
-                    if not active:
-                        break
-                    consumer.assign(list(active))
-                    for partition, offset in window_starts.items():
-                        if partition in active:
-                            consumer.seek(partition, offset)
-                    scanned_this_window = 0
-                    while active and len(matches) < count and self.last_scan_metadata["scanned"] < FILTER_SCAN_CAP:
-                        batch = consumer.poll(timeout_ms=1000)
-                        if not batch:
-                            break
-                        for record in _records(batch):
-                            partition = TopicPartition(record.topic, record.partition)
-                            if record.offset >= window_ends[partition]:
-                                continue
-                            timestamp = record.timestamp
-                            scanned_this_window += 1
-                            self.last_scan_metadata["scanned"] += 1
-                            message = self._message(record, timestamp)
-                            if message_matches_filter(message, filter_text):
-                                matches.append(message)
-                            if self.last_scan_metadata["scanned"] >= FILTER_SCAN_CAP:
-                                self.last_scan_metadata["cap_reached"] = True
-                                break
-                            if len(matches) >= count:
-                                break
-                        if self.last_scan_metadata["scanned"] >= FILTER_SCAN_CAP:
-                            self.last_scan_metadata["cap_reached"] = True
-                            break
-                        if len(matches) >= count:
-                            break
-                        for partition in list(active):
-                            if consumer.position(partition) >= window_ends[partition]:
-                                active.discard(partition)
-                        if not active:
-                            break
-                    if len(matches) >= count or self.last_scan_metadata["cap_reached"]:
-                        break
-                    if scanned_this_window == 0:
-                        break
-                    for partition in partitions:
-                        window_ends[partition] = window_starts.get(partition, 0)
-                matches.sort(key=lambda item: (item.timestamp if item.timestamp is not None else -1, item.partition, item.offset))
+                beginning_offsets = consumer.beginning_offsets(partitions)
+                matches = self._load_latest_messages_with_filter(
+                    consumer,
+                    partitions,
+                    beginning_offsets,
+                    end_offsets,
+                    count,
+                    filter_text,
+                )
                 self.last_scan_metadata["matches"] = len(matches)
                 return matches[-count:]
 

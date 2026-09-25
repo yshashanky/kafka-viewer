@@ -18,6 +18,8 @@ from kafka_viewer.kafka_client import (
 )
 
 BROKER_DISPLAY_MAX_LENGTH = 96
+LOAD_BUTTON_COLOR = "#86EFAC"
+REFRESH_STATISTICS_COLOR = "#93C5FD"
 
 
 def truncate_broker_display(value: str | None, max_length: int = BROKER_DISPLAY_MAX_LENGTH) -> str:
@@ -81,9 +83,9 @@ def main() -> None:
             st.session_state.connection_error = str(exc)
 
     status = st.session_state.connection_status
-    status_col, connection_col, topics_col = st.columns([2, 1, 1])
+    status_col, connection_col, topics_col = st.columns([2, 1.1, 1.1])
     status_col.subheader(f"Status: {status}")
-    if connection_col.button("Test / Refresh Connection"):
+    if connection_col.button("Test / Refresh Connection", use_container_width=True):
         try:
             st.session_state.topics = sorted(client.topics())
             st.session_state.connection_status = "Connected"
@@ -92,7 +94,7 @@ def main() -> None:
             st.session_state.connection_status = "Disconnected"
             st.session_state.connection_error = str(exc)
         st.rerun()
-    if topics_col.button("Refresh Topic"):
+    if topics_col.button("Refresh Topic", use_container_width=True):
         try:
             st.session_state.topics = sorted(client.topics())
         except Exception as exc:
@@ -113,6 +115,7 @@ def main() -> None:
     group_id = group_id_col.text_input("Consumer group ID", value=st.session_state.get("group_id", ""))
     prefix_col, generate_col = st.columns(2)
     group_prefix = prefix_col.text_input("Group ID Prefix (optional)", value=st.session_state.get("group_id_prefix", ""))
+    generate_col.markdown("<div style='height: 28px'></div>", unsafe_allow_html=True)
     if generate_col.button("Generate Temporary Group ID", use_container_width=True):
         st.session_state.group_id_prefix = group_prefix
         st.session_state.group_id = generate_group_id(group_prefix)
@@ -149,14 +152,31 @@ def main() -> None:
     if filter_text.strip():
         st.caption("Filter-aware scans stop after 5,000 inspected records to keep loading responsive.")
 
+    st.markdown(
+        f"""
+        <style>
+        div[data-testid="stButton"] button[kind="primary"] {{
+            background-color: {LOAD_BUTTON_COLOR};
+            border-color: {LOAD_BUTTON_COLOR};
+            color: #14532D;
+        }}
+        div[data-testid="stHorizontalBlock"]:has(button[kind="primary"]) > div[data-testid="column"]:last-child button {{
+            background-color: {REFRESH_STATISTICS_COLOR};
+            border-color: {REFRESH_STATISTICS_COLOR};
+            color: #1E3A8A;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     load_col, clear_col, refresh_statistics_col = st.columns(3)
-    if load_col.button("Load Messages", type="primary"):
+    if load_col.button("Load Messages", type="primary", use_container_width=True):
         try:
             validate_count(count)
             st.session_state.messages = client.load_messages(topic, group_id, mode, int(count), start, end, filter_text)
         except Exception as exc:
             st.error(f"Unable to load messages: {exc}")
-    if clear_col.button("Clear Loaded Messages"):
+    if clear_col.button("Clear Loaded Messages", use_container_width=True):
         st.session_state.messages = []
 
     if st.session_state.get("topic_statistics_topic") != topic:
@@ -165,7 +185,7 @@ def main() -> None:
         st.session_state.topic_statistics_topic = topic
 
     st.subheader("Topic Statistics")
-    refresh_statistics = refresh_statistics_col.button("Refresh Statistics")
+    refresh_statistics = refresh_statistics_col.button("Refresh Statistics", use_container_width=True)
     if refresh_statistics or "topic_statistics" not in st.session_state:
         try:
             st.session_state.topic_statistics = client.get_topic_statistics(topic)
