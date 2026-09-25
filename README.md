@@ -149,15 +149,49 @@ Schema Registry support is optional.
 - If `schema.registry.url` is missing, kafka-viewer uses raw/string/JSON value display behavior.
 - If configured, kafka-viewer attempts Confluent Avro deserialization.
 - Schema Registry config stays separate from Kafka consumer config and is never passed to `KafkaConsumer`.
+- Authentication is optional. HTTPS does not require Basic Authentication unless it is explicitly configured.
+- Certificate verification defaults to enabled for Schema Registry.
 
-Schema Registry example:
+Supported Schema Registry properties:
+
+- `schema.registry.url`
+- `schema.registry.basic.auth.user.info` (optional)
+- `schema.registry.ssl.ca.location` (optional custom CA file)
+- `schema.registry.ssl.verify=true|false` (default: true)
+- `schema.registry.ssl.no.revoke=true|false` (accepted for compatibility; current Python/Confluent stack does not expose equivalent revocation control, so `true` is rejected explicitly)
+- `schema.registry.ssl.certificate.location` (optional client certificate)
+- `schema.registry.ssl.key.location` (optional client private key)
+- `schema.registry.ssl.key.password` (optional client key password)
+
+Schema Registry TLS examples:
 
 ```properties
-schema.registry.url=https://schema-registry.example.com
-schema.registry.basic.auth.user.info=YOUR_USERNAME:YOUR_PASSWORD
+schema.registry.url=https://schema-registry.company.com:8082
+
+# Optional - trust an internal/private CA
+schema.registry.ssl.ca.location=/path/to/company-ca.pem
+
+# Optional - defaults to true
+schema.registry.ssl.verify=true
+
+# Optional - compatibility only; current Python/Confluent stack does not support equivalent revocation control
+schema.registry.ssl.no.revoke=false
+
+# Optional - Basic Authentication
+schema.registry.basic.auth.user.info=username:password
 ```
 
-Avro failures are non-fatal: kafka-viewer continues processing messages and shows bounded safe raw payload + safe error text for failed records.
+For HTTP Schema Registry endpoints:
+
+```properties
+schema.registry.url=http://schema-registry.company.com:8081
+```
+
+When `schema.registry.ssl.verify` is set to `false`, kafka-viewer explicitly disables TLS certificate verification for the Schema Registry client only. This is equivalent to an intentional `curl -k` scenario and does not change Kafka broker TLS behavior.
+
+When using a custom CA, the file path is validated before the Schema Registry client is created and the file contents are never logged.
+
+Confluent Avro deserialization uses the Schema ID embedded in the Confluent wire format and then looks that schema up via the configured Schema Registry. If deserialization fails, kafka-viewer retains the raw message safely, continues processing, and displays a sanitized error instead of crashing the app.
 
 ## UI consumer group generation
 
