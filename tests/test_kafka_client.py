@@ -1,13 +1,16 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from kafka import TopicPartition
 
 from kafka_viewer.kafka_client import (
     KafkaClient,
+    FILTER_SCAN_CAP,
+    export_messages,
     format_value,
     format_message_value,
     generate_group_id,
+    message_matches_filter,
     safe_raw_payload,
     validate_count,
 )
@@ -26,6 +29,62 @@ class Record:
 class Offset:
     def __init__(self, offset):
         self.offset = offset
+
+
+class StatisticsConsumer:
+    records = {}
+    beginning = {}
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.assigned = []
+        self.positions = {}
+        self.closed = False
+        self.__class__.instances.append(self)
+
+    def partitions_for_topic(self, topic):
+        return {partition.partition for partition in self.records if partition.topic == topic}
+
+    def beginning_offsets(self, partitions):
+        return {partition: self.beginning[partition] for partition in partitions}
+
+    def end_offsets(self, partitions):
+        return {partition: self.beginning[partition] + len(self.records[partition]) for partition in partitions}
+
+    def offsets_for_times(self, requested):
+        result = {}
+        for partition, timestamp in requested.items():
+            first_offset = self.beginning[partition]
+            for index, record in enumerate(self.records[partition]):
+                if record.timestamp >= timestamp:
+                    first_offset = self.beginning[partition] + index
+                    break
+            else:
+                result[partition] = None
+                continue
+            result[partition] = Offset(first_offset)
+        return result
+
+    def assign(self, partitions):
+        self.assigned = partitions
+
+    def seek(self, partition, offset):
+        self.positions[partition] = offset
+
+    def poll(self, timeout_ms):
+        batch = {}
+        for partition in self.assigned:
+            position = self.positions[partition]
+            index = position - self.beginning[partition]
+            if 0 <= index < len(self.records[partition]):
+                record = self.records[partition][index]
+                self.positions[partition] = position + 1
+                batch[partition] = [record]
+        return batch
+
+    def close(self):
+        self.closed = True
 
 
 class FakeConsumer:
@@ -87,6 +146,7 @@ def setup_function():
     FakeConsumer.records = {partition: list(records) for partition, records in FakeConsumer.default_records.items()}
     FakeSchemaRegistry.instances.clear()
     FakeAvroDeserializer.calls.clear()
+    StatisticsConsumer.instances.clear()
 
 
 class FakeSchemaRegistry:
@@ -199,6 +259,120 @@ def test_from_beginning_is_bounded():
     messages = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=FakeConsumer).load_messages("events", "group", "beginning", 2)
 
     assert len(messages) == 2
+
+
+def test_message_filter_matches_payload_content():
+    message = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=FakeConsumer).load_messages("events", "group", "beginning", 2)[1]
+
+    assert message_matches_filter(message, "last-1") is True
+    assert message_matches_filter(message, "missing") is False
+
+
+def test_filter_scan_cap_is_enforced_for_latest_mode():
+    messages = [
+        Record("events", 0, index, 1000 + index, None, f'{{"value": "other-{index}"}}'.encode("utf-8"))
+        for index in range(FILTER_SCAN_CAP + 10)
+    ]
+    FakeConsumer.records[TopicPartition("events", 0)] = messages
+
+    client = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=FakeConsumer)
+    filtered = client.load_messages("events", "group", "latest", 10, filter_text="match")
+
+    assert len(filtered) <= 10
+    assert client.last_scan_metadata["cap_reached"] is True
+    assert client.last_scan_metadata["scanned"] >= FILTER_SCAN_CAP
+
+
+def test_export_messages_returns_json_ready_rows():
+    messages = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=FakeConsumer).load_messages("events", "group", "beginning", 2)
+
+    exported = export_messages(messages)
+
+    assert exported[0]["partition"] == 0
+    assert exported[0]["message"] == {"a": 1}
+    assert exported[1]["key"] == "k"
+
+
+def test_topic_statistics_counts_retained_records_from_partition_offsets():
+    now = datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc)
+    StatisticsConsumer.beginning = {
+        TopicPartition("stats", 0): 100,
+        TopicPartition("stats", 1): 200,
+    }
+    StatisticsConsumer.records = {
+        TopicPartition("stats", 0): [Record("stats", 0, 100 + index, int((now - timedelta(hours=index)).timestamp() * 1000), None, b"") for index in range(50)],
+        TopicPartition("stats", 1): [Record("stats", 1, 200 + index, int((now - timedelta(days=2, hours=index)).timestamp() * 1000), None, b"") for index in range(25)],
+    }
+
+    statistics = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=StatisticsConsumer).get_topic_statistics("stats", now)
+
+    assert statistics.total_records == 75
+    assert statistics.partitions == 2
+
+
+def test_topic_statistics_handles_empty_partitions_and_timestamp_boundaries():
+    local_timezone = datetime.now().astimezone().tzinfo
+    now = datetime(2026, 9, 26, 12, 0, tzinfo=local_timezone)
+    start_of_today = datetime(2026, 9, 26, tzinfo=local_timezone)
+    StatisticsConsumer.beginning = {
+        TopicPartition("stats", 0): 10,
+        TopicPartition("stats", 1): 50,
+    }
+    StatisticsConsumer.records = {
+        TopicPartition("stats", 0): [
+            Record("stats", 0, 10, int((start_of_today - timedelta(milliseconds=1)).timestamp() * 1000), None, b""),
+            Record("stats", 0, 11, int(start_of_today.timestamp() * 1000), None, b""),
+            Record("stats", 0, 12, int((start_of_today + timedelta(hours=1)).timestamp() * 1000), None, b""),
+            Record("stats", 0, 13, int((now - timedelta(hours=1)).timestamp() * 1000), None, b""),
+            Record("stats", 0, 14, int((start_of_today + timedelta(days=1)).timestamp() * 1000), None, b""),
+        ],
+        TopicPartition("stats", 1): [],
+    }
+
+    statistics = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=StatisticsConsumer).get_topic_statistics("stats", now)
+
+    assert statistics.total_records == 5
+    assert statistics.published_today == 3
+    assert statistics.published_last_hour == 1
+
+
+def test_topic_statistics_selects_latest_timestamp_and_refreshes():
+    first_now = datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc)
+    StatisticsConsumer.beginning = {TopicPartition("stats", 0): 0}
+    StatisticsConsumer.records = {
+        TopicPartition("stats", 0): [Record("stats", 0, 0, 1000, None, b"")]
+    }
+    client = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=StatisticsConsumer)
+
+    first = client.get_topic_statistics("stats", first_now)
+    StatisticsConsumer.records[TopicPartition("stats", 0)].append(Record("stats", 0, 1, 2000, None, b""))
+    second = client.get_topic_statistics("stats", first_now)
+
+    assert first.latest_timestamp == 1000
+    assert second.total_records == 2
+    assert second.latest_timestamp == 2000
+
+
+def test_topic_statistics_empty_topic_preserves_partition_count():
+    StatisticsConsumer.beginning = {TopicPartition("empty", 0): 7, TopicPartition("empty", 1): 3}
+    StatisticsConsumer.records = {TopicPartition("empty", 0): [], TopicPartition("empty", 1): []}
+
+    statistics = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=StatisticsConsumer).get_topic_statistics("empty")
+
+    assert statistics.total_records == 0
+    assert statistics.published_today == 0
+    assert statistics.published_last_hour == 0
+    assert statistics.latest_timestamp is None
+    assert statistics.partitions == 2
+
+
+def test_topic_statistics_uses_read_only_consumer_and_offset_apis():
+    StatisticsConsumer.beginning = {TopicPartition("stats", 0): 100}
+    StatisticsConsumer.records = {TopicPartition("stats", 0): []}
+
+    KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=StatisticsConsumer).get_topic_statistics("stats")
+
+    assert StatisticsConsumer.instances[-1].kwargs["enable_auto_commit"] is False
 
 
 def test_date_range_filters_record_timestamps():
