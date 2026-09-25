@@ -17,6 +17,18 @@ from kafka_viewer.kafka_client import (
     validate_count,
 )
 
+BROKER_DISPLAY_MAX_LENGTH = 96
+
+
+def truncate_broker_display(value: str | None, max_length: int = BROKER_DISPLAY_MAX_LENGTH) -> str:
+    if value is None:
+        return ""
+    if len(value) <= max_length:
+        return value
+    if max_length <= 3:
+        return "." * max_length
+    return f"{value[:max_length - 3]}..."
+
 
 def _config_path() -> str:
     parser = argparse.ArgumentParser(add_help=False)
@@ -51,7 +63,7 @@ def main() -> None:
     for property_name in unsupported:
         st.warning(f"Unsupported Kafka property ignored: {property_name}")
     bootstrap_servers = properties["kafka.bootstrap.servers"]
-    st.write(f"Broker: `{bootstrap_servers}`")
+    st.write(f"Broker: `{truncate_broker_display(bootstrap_servers)}`")
     try:
         client = KafkaClient(consumer_config, schema_registry_config)
     except Exception:
