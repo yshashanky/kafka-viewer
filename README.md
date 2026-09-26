@@ -219,6 +219,16 @@ Use **Refresh Statistics** to obtain fresh values without clearing loaded messag
 
 When a message filter is used with Latest mode, kafka-viewer scans partition-local latest regions and returns the newest matching records across the topic. Kafka record timestamps determine cross-partition recency; partition and offset provide deterministic tie-breaking. The global filter scan cap remains 5,000 records.
 
+### Message Filter Syntax
+
+The Message Filter is a case-insensitive literal substring filter applied to the searchable message value, not Kafka metadata such as keys, timestamps, partitions, offsets, or headers.
+
+- `payment` matches messages containing `payment`.
+- `payment?failed?timeout` uses `?` as OR and matches a message containing any term.
+- `payment&failed&timeout` uses `&` as AND and requires all terms in the same message.
+
+Whitespace around terms is ignored and empty terms are discarded, so `payment??failed` and ` payment ? failed ` are valid. Terms remain literal text; regular-expression syntax is not interpreted. Mixing `?` and `&` is not supported and is rejected with a validation message. Blank or operator-only filters use the existing unfiltered behavior. Filtered Latest retrieval continues to use the adaptive scan strategy and its global 5,000-record safety cap rather than scanning the cap unnecessarily.
+
 ## Offset behavior
 
 kafka-viewer is intended for inspection. It does not commit consumer offsets or modify existing consumer-group progress.

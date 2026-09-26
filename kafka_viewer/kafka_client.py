@@ -4,13 +4,17 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Literal
 
 from kafka import KafkaConsumer, TopicPartition
 from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroDeserializer
 
 FILTER_SCAN_CAP = 5000
+# Keep filtered Latest responsive while retaining a bounded global search budget.
+MAX_SCAN = FILTER_SCAN_CAP
+MIN_SCAN = 500
+SCAN_MULTIPLIER = 50
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,12 @@ class TopicStatistics:
     latest_timestamp: int | None
     partitions: int
     timestamp_error: str | None = None
+
+
+@dataclass(frozen=True)
+class FilterExpression:
+    terms: tuple[str, ...]
+    operator: Literal["or", "and"] | None = None
 
 
 def validate_count(value: Any) -> int:
@@ -79,16 +89,34 @@ def format_message_value(message: Message) -> str:
     return format_value(message.value)
 
 
-def message_matches_filter(message: Message, filter_text: str | None) -> bool:
-    if filter_text is None:
-        return True
-    normalized = filter_text.strip()
+def parse_filter(filter_text: str | None) -> FilterExpression | None:
+    normalized = (filter_text or "").strip()
     if not normalized:
+        return None
+    has_or = "?" in normalized
+    has_and = "&" in normalized
+    if has_or and has_and:
+        raise ValueError("Use either '?' for OR or '&' for AND, not both in the same filter.")
+    operator = "or" if has_or else "and" if has_and else None
+    separator = "?" if has_or else "&"
+    terms = tuple(term.strip() for term in normalized.split(separator) if term.strip())
+    if not terms:
+        return None
+    return FilterExpression(terms, operator)
+
+
+def message_matches_filter(message: Message, filter_text: str | FilterExpression | None) -> bool:
+    expression = parse_filter(filter_text) if isinstance(filter_text, str) or filter_text is None else filter_text
+    if expression is None:
         return True
     body = (message.raw_value if message.value_error and message.raw_value is not None else format_value(message.value))
     if body is None:
         return False
-    return normalized.casefold() in str(body).casefold()
+    searchable = str(body).casefold()
+    terms = (term.casefold() for term in expression.terms)
+    if expression.operator == "and":
+        return all(term in searchable for term in terms)
+    return any(term in searchable for term in terms)
 
 
 def export_messages(messages: Iterable[Message]) -> list[dict[str, Any]]:
@@ -219,7 +247,7 @@ class KafkaClient:
                 published_last_hour = None
                 timestamp_failures += 1
             try:
-                latest_timestamp = self._latest_timestamp(consumer, partitions, end_offsets)
+                latest_timestamp = self._latest_timestamp(consumer, partitions, beginning_offsets, end_offsets)
             except Exception:
                 latest_timestamp = None
                 timestamp_failures += 1
@@ -259,9 +287,10 @@ class KafkaClient:
         self,
         consumer: Any,
         partitions: list[TopicPartition],
+        beginning_offsets: dict[TopicPartition, int],
         end_offsets: dict[TopicPartition, int],
     ) -> int | None:
-        latest_records = self._latest_retained_records(consumer, partitions, end_offsets)
+        latest_records = self._latest_retained_records(consumer, partitions, beginning_offsets, end_offsets)
         timestamps = [record.timestamp for record in latest_records if record.timestamp is not None]
         return max(timestamps) if timestamps else None
 
@@ -269,34 +298,24 @@ class KafkaClient:
         self,
         consumer: Any,
         partitions: list[TopicPartition],
+        beginning_offsets: dict[TopicPartition, int],
         end_offsets: dict[TopicPartition, int],
     ) -> list[Any]:
-        latest_partitions = [partition for partition in partitions if end_offsets[partition] > 0]
+        latest_partitions = [partition for partition in partitions if end_offsets[partition] > beginning_offsets[partition]]
         if not latest_partitions:
             return []
-        consumer.assign(latest_partitions)
-        for partition in latest_partitions:
-            consumer.seek(partition, end_offsets[partition] - 1)
-
         records: dict[TopicPartition, Any] = {}
-        active = set(latest_partitions)
-        idle_polls = 0
-        while active:
-            batch = consumer.poll(timeout_ms=1000)
-            if not batch:
-                idle_polls += 1
-                if idle_polls >= 2:
+        for partition in latest_partitions:
+            consumer.assign([partition])
+            consumer.seek(partition, end_offsets[partition] - 1)
+            for _ in range(3):
+                batch = consumer.poll(timeout_ms=1000)
+                for record in _records(batch):
+                    if record.partition == partition.partition and record.offset == end_offsets[partition] - 1:
+                        records[partition] = record
+                        break
+                if partition in records:
                     break
-                continue
-            idle_polls = 0
-            for record in _records(batch):
-                partition = TopicPartition(record.topic, record.partition)
-                if partition in active and record.offset == end_offsets[partition] - 1:
-                    records[partition] = record
-                    active.discard(partition)
-            for partition in list(active):
-                if consumer.position(partition) >= end_offsets[partition]:
-                    active.discard(partition)
         return [records[partition] for partition in latest_partitions if partition in records]
 
     def _load_latest_messages_with_filter(
@@ -306,16 +325,25 @@ class KafkaClient:
         beginning_offsets: dict[TopicPartition, int],
         end_offsets: dict[TopicPartition, int],
         count: int,
-        filter_text: str,
+        filter_expression: FilterExpression,
     ) -> list[Message]:
-        window_size = max(1, min(100, count))
+        initial_target = min(MAX_SCAN, max(MIN_SCAN, count * SCAN_MULTIPLIER))
+        scan_target = initial_target
         scan_ends = dict(end_offsets)
         matches: list[Message] = []
         while scan_ends and self.last_scan_metadata["scanned"] < FILTER_SCAN_CAP:
+            partition_targets = self._partition_scan_targets(
+                beginning_offsets,
+                end_offsets,
+                scan_target,
+            )
             windows = {
-                partition: (max(beginning_offsets[partition], scan_ends[partition] - window_size), scan_ends[partition])
+                partition: (
+                    max(beginning_offsets[partition], end_offsets[partition] - partition_targets[partition]),
+                    scan_ends[partition],
+                )
                 for partition in scan_ends
-                if scan_ends[partition] > beginning_offsets[partition]
+                if partition in partition_targets and scan_ends[partition] > beginning_offsets[partition]
             }
             if not windows:
                 break
@@ -339,7 +367,7 @@ class KafkaClient:
                         continue
                     self.last_scan_metadata["scanned"] += 1
                     message = self._message(record, record.timestamp)
-                    if message_matches_filter(message, filter_text):
+                    if message_matches_filter(message, filter_expression):
                         matches.append(message)
                     if self.last_scan_metadata["scanned"] >= FILTER_SCAN_CAP:
                         self.last_scan_metadata["cap_reached"] = True
@@ -349,12 +377,64 @@ class KafkaClient:
                 for partition in list(active):
                     if consumer.position(partition) >= windows[partition][1]:
                         active.discard(partition)
+            if len(matches) >= count:
+                break
             for partition, (window_start, _) in windows.items():
+                if window_start >= scan_ends[partition]:
+                    scan_ends.pop(partition, None)
+                    continue
                 scan_ends[partition] = window_start
             scan_ends = {partition: end for partition, end in scan_ends.items() if end > beginning_offsets[partition]}
+            if self.last_scan_metadata["scanned"] >= FILTER_SCAN_CAP:
+                break
+            next_target = min(MAX_SCAN, scan_target * 2)
+            if next_target <= scan_target:
+                break
+            scan_target = next_target
 
         matches.sort(key=lambda item: (item.timestamp if item.timestamp is not None else -1, item.partition, item.offset))
         return matches[-count:]
+
+    @staticmethod
+    def _partition_scan_targets(
+        beginning_offsets: dict[TopicPartition, int],
+        end_offsets: dict[TopicPartition, int],
+        total_target: int,
+    ) -> dict[TopicPartition, int]:
+        available = {
+            partition: max(0, end_offsets[partition] - beginning_offsets[partition])
+            for partition in end_offsets
+        }
+        available = {partition: size for partition, size in available.items() if size > 0}
+        total_available = sum(available.values())
+        target = min(total_target, total_available)
+        if not available or target <= 0:
+            return {}
+
+        targets = {partition: 0 for partition in available}
+        remaining_target = target
+        remaining_available = total_available
+        for partition, size in available.items():
+            if remaining_target <= 0:
+                break
+            share = max(1, (remaining_target * size) // remaining_available)
+            share = min(size, share, remaining_target)
+            targets[partition] = share
+            remaining_target -= share
+            remaining_available -= size
+
+        while remaining_target:
+            progressed = False
+            for partition, size in available.items():
+                if targets[partition] < size:
+                    targets[partition] += 1
+                    remaining_target -= 1
+                    progressed = True
+                    if not remaining_target:
+                        break
+            if not progressed:
+                break
+        return targets
 
     def load_messages(
         self,
@@ -376,10 +456,10 @@ class KafkaClient:
         if mode == "range" and datetime_to_millis(start) > datetime_to_millis(end):
             raise ValueError("End date/time must not be before start date/time")
 
-        normalized_filter = (filter_text or "").strip()
-        if not normalized_filter:
+        filter_expression = parse_filter(filter_text)
+        if filter_expression is None:
             return self._load_messages_without_filter(topic, group_id, mode, count, start, end)
-        return self._load_messages_with_filter(topic, group_id, mode, count, normalized_filter, start, end)
+        return self._load_messages_with_filter(topic, group_id, mode, count, filter_expression, start, end)
 
     def _load_messages_without_filter(
         self,
@@ -460,7 +540,7 @@ class KafkaClient:
         group_id: str,
         mode: str,
         count: int,
-        filter_text: str,
+        filter_expression: FilterExpression,
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> list[Message]:
@@ -484,7 +564,7 @@ class KafkaClient:
                     beginning_offsets,
                     end_offsets,
                     count,
-                    filter_text,
+                    filter_expression,
                 )
                 self.last_scan_metadata["matches"] = len(matches)
                 return matches[-count:]
@@ -526,7 +606,7 @@ class KafkaClient:
                         continue
                     self.last_scan_metadata["scanned"] += 1
                     message = self._message(record, timestamp)
-                    if message_matches_filter(message, filter_text):
+                    if message_matches_filter(message, filter_expression):
                         matches.append(message)
                     if self.last_scan_metadata["scanned"] >= FILTER_SCAN_CAP:
                         self.last_scan_metadata["cap_reached"] = True

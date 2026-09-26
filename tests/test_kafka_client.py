@@ -6,11 +6,13 @@ from kafka import TopicPartition
 from kafka_viewer.kafka_client import (
     KafkaClient,
     FILTER_SCAN_CAP,
+    Message,
     export_messages,
     format_value,
     format_message_value,
     generate_group_id,
     message_matches_filter,
+    parse_filter,
     safe_raw_payload,
     validate_count,
 )
@@ -96,6 +98,7 @@ class PartitionedConsumer:
         self.kwargs = kwargs
         self.assigned = []
         self.positions = {}
+        self.seeks = []
         self.__class__.instances.append(self)
 
     def partitions_for_topic(self, topic):
@@ -112,6 +115,7 @@ class PartitionedConsumer:
 
     def seek(self, partition, offset):
         self.positions[partition] = offset
+        self.seeks.append((partition, offset))
 
     def poll(self, timeout_ms):
         batch = {}
@@ -312,6 +316,51 @@ def test_message_filter_matches_payload_content():
     assert message_matches_filter(message, "missing") is False
 
 
+@pytest.mark.parametrize(
+    ("filter_text", "terms", "operator"),
+    [
+        ("payment", ("payment",), None),
+        ("payment?failed?timeout", ("payment", "failed", "timeout"), "or"),
+        (" payment ? failed ? timeout ", ("payment", "failed", "timeout"), "or"),
+        ("payment&failed&timeout", ("payment", "failed", "timeout"), "and"),
+        ("payment??failed", ("payment", "failed"), "or"),
+        ("payment&&failed", ("payment", "failed"), "and"),
+        ("?payment?failed?", ("payment", "failed"), "or"),
+        ("&payment&failed&", ("payment", "failed"), "and"),
+    ],
+)
+def test_parse_filter_terms_and_operator(filter_text, terms, operator):
+    expression = parse_filter(filter_text)
+
+    assert expression is not None
+    assert expression.terms == terms
+    assert expression.operator == operator
+
+
+@pytest.mark.parametrize("filter_text", [None, "", "   ", "???", "&&&"])
+def test_parse_filter_empty_expression_uses_no_filter_semantics(filter_text):
+    assert parse_filter(filter_text) is None
+
+
+def test_parse_filter_rejects_mixed_operators():
+    with pytest.raises(ValueError, match="either.*OR"):
+        parse_filter("payment&failed?timeout")
+
+
+def test_filter_matching_supports_or_and_case_insensitive_literal_terms():
+    payment = Message(0, 0, 1, None, b"Payment processed")
+    failed = Message(0, 1, 2, None, b"FAILED request")
+    both = Message(0, 2, 3, None, b"payment failed")
+    unrelated = Message(0, 3, 4, None, b"complete")
+
+    assert message_matches_filter(payment, "PAYMENT?timeout") is True
+    assert message_matches_filter(failed, "payment?failed") is True
+    assert message_matches_filter(both, "payment&failed") is True
+    assert message_matches_filter(payment, "payment&failed") is False
+    assert message_matches_filter(unrelated, "payment?failed") is False
+    assert message_matches_filter(Message(0, 4, 5, None, b"literal .*+?[]()"), ".*+?[]()") is True
+
+
 def test_filter_scan_cap_is_enforced_for_latest_mode():
     messages = [
         Record("events", 0, index, 1000 + index, None, f'{{"value": "other-{index}"}}'.encode("utf-8"))
@@ -349,6 +398,33 @@ def test_latest_filter_returns_newest_matches_across_partitions_by_timestamp():
     )
 
     assert [(message.partition, message.offset) for message in messages] == [(1, 10), (1, 11)]
+
+
+def test_latest_filter_or_and_predicates_use_one_combined_scan():
+    PartitionedConsumer.beginning = {TopicPartition("events", 0): 0}
+    PartitionedConsumer.records = {
+        TopicPartition("events", 0): [
+            Record("events", 0, 0, 1000, None, b"payment processed"),
+            Record("events", 0, 1, 2000, None, b"request failed"),
+            Record("events", 0, 2, 3000, None, b"payment failed"),
+        ]
+    }
+
+    client = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=PartitionedConsumer)
+    or_messages = client.load_messages("events", "group", "latest", 3, filter_text="payment?failed")
+    and_messages = client.load_messages("events", "group", "latest", 3, filter_text="payment&failed")
+
+    assert [message.offset for message in or_messages] == [0, 1, 2]
+    assert [message.offset for message in and_messages] == [2]
+
+
+def test_mixed_filter_fails_before_kafka_scan():
+    client = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=PartitionedConsumer)
+
+    with pytest.raises(ValueError, match="either.*OR"):
+        client.load_messages("events", "group", "latest", 1, filter_text="payment&failed?timeout")
+
+    assert PartitionedConsumer.instances == []
 
 
 def test_latest_filter_does_not_stop_when_first_partition_has_enough_matches():
@@ -389,6 +465,131 @@ def test_latest_filter_returns_exact_requested_count_from_larger_match_set():
 
     assert len(messages) == 10
     assert [message.offset for message in messages] == list(range(10, 20))
+
+
+def test_latest_filter_count_100_returns_newest_100_matches():
+    PartitionedConsumer.beginning = {TopicPartition("events", 0): 0}
+    PartitionedConsumer.records = {
+        TopicPartition("events", 0): [
+            Record("events", 0, offset, offset, None, f"match-{offset}".encode())
+            for offset in range(150)
+        ]
+    }
+
+    client = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=PartitionedConsumer)
+    messages = client.load_messages(
+        "events", "group", "latest", 100, filter_text="match"
+    )
+
+    assert len(messages) == 100
+    assert [message.offset for message in messages] == list(range(50, 150))
+    assert client.last_scan_metadata["scanned"] == 150
+
+
+def test_message_filter_treats_special_characters_as_literal_text():
+    PartitionedConsumer.beginning = {TopicPartition("events", 0): 0}
+    PartitionedConsumer.records = {
+        TopicPartition("events", 0): [Record("events", 0, 0, 1000, None, b"literal .*+?[]()")]
+    }
+
+    messages = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=PartitionedConsumer).load_messages(
+        "events", "group", "latest", 1, filter_text=".*+?[]()"
+    )
+
+    assert len(messages) == 1
+
+
+def test_latest_filter_uses_fixed_window_for_small_requested_count():
+    PartitionedConsumer.beginning = {TopicPartition("events", 0): 0}
+    PartitionedConsumer.records = {
+        TopicPartition("events", 0): [
+            Record("events", 0, offset, offset, None, b"other")
+            for offset in range(150)
+        ]
+    }
+
+    client = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=PartitionedConsumer)
+    client.load_messages("events", "group", "latest", 10, filter_text="match")
+
+    assert PartitionedConsumer.instances[-1].seeks[0] == (TopicPartition("events", 0), 0)
+
+
+def test_latest_filter_stops_after_early_cross_partition_matches():
+    PartitionedConsumer.beginning = {
+        TopicPartition("events", 0): 0,
+        TopicPartition("events", 1): 0,
+    }
+    PartitionedConsumer.records = {
+        TopicPartition("events", partition): [
+            Record("events", partition, offset, offset, None, b"match")
+            for offset in range(150)
+        ]
+        for partition in (0, 1)
+    }
+
+    client = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=PartitionedConsumer)
+    messages = client.load_messages("events", "group", "latest", 10, filter_text="match")
+
+    assert len(messages) == 10
+    assert client.last_scan_metadata["scanned"] == 300
+    assert client.last_scan_metadata["scanned"] < FILTER_SCAN_CAP
+
+
+def test_latest_filter_initial_target_is_500_for_count_10():
+    PartitionedConsumer.beginning = {TopicPartition("events", 0): 0}
+    PartitionedConsumer.records = {
+        TopicPartition("events", 0): [
+            Record("events", 0, offset, offset, None, b"match")
+            for offset in range(600)
+        ]
+    }
+
+    client = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=PartitionedConsumer)
+    messages = client.load_messages("events", "group", "latest", 10, filter_text="match")
+
+    assert len(messages) == 10
+    assert client.last_scan_metadata["scanned"] == 500
+
+
+def test_latest_filter_expands_only_when_initial_target_has_too_few_matches():
+    PartitionedConsumer.beginning = {TopicPartition("events", 0): 0}
+    PartitionedConsumer.records = {
+        TopicPartition("events", 0): [
+            Record("events", 0, offset, offset, None, b"match" if offset < 3 or offset >= 993 else b"other")
+            for offset in range(1000)
+        ]
+    }
+
+    client = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=PartitionedConsumer)
+    messages = client.load_messages("events", "group", "latest", 10, filter_text="match")
+
+    assert len(messages) == 10
+    assert client.last_scan_metadata["scanned"] == 1000
+    assert client.last_scan_metadata["scanned"] < FILTER_SCAN_CAP
+    assert PartitionedConsumer.instances[-1].seeks == [
+        (TopicPartition("events", 0), 500),
+        (TopicPartition("events", 0), 0),
+    ]
+
+
+def test_partition_scan_targets_are_global_and_skip_empty_partitions():
+    targets = KafkaClient._partition_scan_targets(
+        {
+            TopicPartition("events", 0): 0,
+            TopicPartition("events", 1): 10,
+            TopicPartition("events", 2): 0,
+        },
+        {
+            TopicPartition("events", 0): 1000,
+            TopicPartition("events", 1): 10,
+            TopicPartition("events", 2): 0,
+        },
+        500,
+    )
+
+    assert sum(targets.values()) == 500
+    assert TopicPartition("events", 1) not in targets
+    assert TopicPartition("events", 2) not in targets
 
 
 def test_latest_filter_scan_cap_is_global_across_partitions():
