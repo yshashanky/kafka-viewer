@@ -83,7 +83,8 @@ def main() -> None:
             st.session_state.connection_error = str(exc)
 
     status = st.session_state.connection_status
-    status_col, connection_col, topics_col = st.columns([2, 1.1, 1.1])
+    status_col, controls_col = st.columns([1, 1])
+    connection_col, topics_col = controls_col.columns([1.7, 0.8])
     status_col.subheader(f"Status: {status}")
     if connection_col.button("Test / Refresh Connection", use_container_width=True):
         try:
@@ -146,6 +147,7 @@ def main() -> None:
         "Message Filter (optional)",
         value=st.session_state.get("message_filter", ""),
         placeholder="e.g. error, status, \"ready\"",
+        help="Use ? for OR and & for AND. Do not mix both operators.",
     )
     st.session_state.message_filter = filter_text
 
@@ -220,7 +222,7 @@ def main() -> None:
         return
     if filter_text.strip():
         metadata = getattr(client, "last_scan_metadata", {})
-        if metadata.get("cap_reached"):
+        if metadata.get("cap_reached") and metadata.get("matches", 0) < metadata.get("requested", 0):
             st.warning("The filter reached the 5,000-record scan cap. Results may be partial.")
         else:
             st.caption(f"Scanned {metadata.get('scanned', 0)} record(s) matching the filter.")
