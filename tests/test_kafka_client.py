@@ -93,6 +93,21 @@ class StatisticsConsumer:
         self.closed = True
 
 
+class GapStatisticsConsumer(StatisticsConsumer):
+    def end_offsets(self, partitions):
+        return {partition: 110 for partition in partitions}
+
+    def poll(self, timeout_ms):
+        batch = {}
+        for partition in self.assigned:
+            position = self.positions[partition]
+            record = next((item for item in self.records[partition] if item.offset >= position), None)
+            if record is not None:
+                self.positions[partition] = record.offset + 1
+                batch[partition] = [record]
+        return batch
+
+
 class PartitionedConsumer:
     records = {}
     beginning = {}
@@ -757,6 +772,21 @@ def test_latest_record_timestamp_lookup_uses_selected_group_id():
 
     assert timestamp == 9000
     assert StatisticsConsumer.instances[-1].kwargs["group_id"] == "approved-viewer-group"
+
+
+def test_latest_record_timestamp_accepts_offset_gap_before_end_offset():
+    GapStatisticsConsumer.beginning = {TopicPartition("stats", 0): 100}
+    GapStatisticsConsumer.records = {
+        TopicPartition("stats", 0): [
+            Record("stats", 0, 100, 1000, None, b""),
+            Record("stats", 0, 105, 5000, None, b""),
+            Record("stats", 0, 109, 9000, None, b""),
+        ]
+    }
+
+    timestamp = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=GapStatisticsConsumer).get_latest_record_timestamp("stats")
+
+    assert timestamp == 9000
 
 
 def test_topic_statistics_batches_latest_partition_reads():

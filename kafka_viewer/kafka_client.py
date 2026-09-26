@@ -340,8 +340,12 @@ class KafkaClient:
             batch = consumer.poll(timeout_ms=1000)
             for record in _records(batch):
                 partition = TopicPartition(record.topic, record.partition)
-                if partition in latest_partitions and record.offset == end_offsets[partition] - 1:
-                    if partition not in records:
+                if (
+                    partition in latest_partitions
+                    and beginning_offsets[partition] <= record.offset < end_offsets[partition]
+                    and (partition not in records or record.offset > records[partition].offset)
+                ):
+                    if partition not in records or record.offset > records[partition].offset:
                         records[partition] = record
             if len(records) == len(latest_partitions):
                 break
