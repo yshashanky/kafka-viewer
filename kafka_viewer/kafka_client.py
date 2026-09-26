@@ -305,17 +305,18 @@ class KafkaClient:
         if not latest_partitions:
             return []
         records: dict[TopicPartition, Any] = {}
+        consumer.assign(latest_partitions)
         for partition in latest_partitions:
-            consumer.assign([partition])
             consumer.seek(partition, end_offsets[partition] - 1)
-            for _ in range(3):
-                batch = consumer.poll(timeout_ms=1000)
-                for record in _records(batch):
-                    if record.partition == partition.partition and record.offset == end_offsets[partition] - 1:
+        for _ in range(3):
+            batch = consumer.poll(timeout_ms=1000)
+            for record in _records(batch):
+                partition = TopicPartition(record.topic, record.partition)
+                if partition in latest_partitions and record.offset == end_offsets[partition] - 1:
+                    if partition not in records:
                         records[partition] = record
-                        break
-                if partition in records:
-                    break
+            if len(records) == len(latest_partitions):
+                break
         return [records[partition] for partition in latest_partitions if partition in records]
 
     def _load_latest_messages_with_filter(

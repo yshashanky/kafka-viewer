@@ -84,7 +84,7 @@ def main() -> None:
 
     status = st.session_state.connection_status
     status_col, controls_col = st.columns([1, 1])
-    connection_col, topics_col = controls_col.columns([1.7, 0.8])
+    connection_col, topics_col = controls_col.columns(2)
     status_col.subheader(f"Status: {status}")
     if connection_col.button("Test / Refresh Connection", use_container_width=True):
         try:

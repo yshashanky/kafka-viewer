@@ -1,5 +1,9 @@
 from kafka_viewer.config import build_consumer_config
 from kafka_viewer.ui import LOAD_BUTTON_COLOR, REFRESH_STATISTICS_COLOR, truncate_broker_display
+from pathlib import Path
+
+
+UI_SOURCE = Path(__file__).parents[1] / "kafka_viewer" / "ui.py"
 
 
 def test_short_broker_display_is_unchanged():
@@ -41,3 +45,9 @@ def test_empty_broker_display_is_safe():
 def test_action_button_colors_match_requested_palette():
     assert LOAD_BUTTON_COLOR == "#86EFAC"
     assert REFRESH_STATISTICS_COLOR == "#93C5FD"
+
+
+def test_status_controls_use_equal_nested_columns():
+    source = UI_SOURCE.read_text(encoding="utf-8")
+
+    assert "connection_col, topics_col = controls_col.columns(2)" in source
