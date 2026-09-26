@@ -51,3 +51,12 @@ def test_status_controls_use_equal_nested_columns():
     source = UI_SOURCE.read_text(encoding="utf-8")
 
     assert "connection_col, topics_col = controls_col.columns(2)" in source
+
+
+def test_load_messages_updates_shared_latest_timestamp_state():
+    source = UI_SOURCE.read_text(encoding="utf-8")
+
+    assert "client.get_latest_record_timestamp(topic, group_id=group_id or None)" in source
+    assert "replace(statistics, latest_timestamp=latest_timestamp)" in source
+    assert "st.session_state.latest_record_timestamp = latest_timestamp" in source
+    assert "st.session_state.latest_record_timestamp = st.session_state.topic_statistics.latest_timestamp" in source

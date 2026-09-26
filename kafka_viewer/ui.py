@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from datetime import datetime, time, timezone
 
 import streamlit as st
@@ -176,6 +177,14 @@ def main() -> None:
         try:
             validate_count(count)
             st.session_state.messages = client.load_messages(topic, group_id, mode, int(count), start, end, filter_text)
+            try:
+                latest_timestamp = client.get_latest_record_timestamp(topic, group_id=group_id or None)
+                st.session_state.latest_record_timestamp = latest_timestamp
+                statistics = st.session_state.get("topic_statistics")
+                if statistics is not None and st.session_state.get("topic_statistics_topic") == topic:
+                    st.session_state.topic_statistics = replace(statistics, latest_timestamp=latest_timestamp)
+            except Exception:
+                pass
         except Exception as exc:
             st.error(f"Unable to load messages: {exc}")
     if clear_col.button("Clear Loaded Messages", use_container_width=True):
@@ -190,7 +199,8 @@ def main() -> None:
     refresh_statistics = refresh_statistics_col.button("Refresh Statistics", use_container_width=True)
     if refresh_statistics or "topic_statistics" not in st.session_state:
         try:
-            st.session_state.topic_statistics = client.get_topic_statistics(topic)
+            st.session_state.topic_statistics = client.get_topic_statistics(topic, group_id=group_id or None)
+            st.session_state.latest_record_timestamp = st.session_state.topic_statistics.latest_timestamp
             st.session_state.topic_statistics_refreshed_at = datetime.now().astimezone()
         except Exception:
             st.session_state.pop("topic_statistics", None)

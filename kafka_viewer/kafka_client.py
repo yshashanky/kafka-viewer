@@ -214,13 +214,21 @@ class KafkaClient:
         finally:
             consumer.close()
 
-    def get_topic_statistics(self, topic: str, now: datetime | None = None) -> TopicStatistics:
+    def get_topic_statistics(
+        self,
+        topic: str,
+        now: datetime | None = None,
+        group_id: str | None = None,
+    ) -> TopicStatistics:
         """Return retained-topic metrics without committing offsets or consuming the topic."""
-        consumer = self._consumer(
-            enable_auto_commit=False,
-            consumer_timeout_ms=1500,
-            request_timeout_ms=5000,
-        )
+        consumer_overrides: dict[str, Any] = {
+            "enable_auto_commit": False,
+            "consumer_timeout_ms": 1500,
+            "request_timeout_ms": 5000,
+        }
+        if group_id is not None:
+            consumer_overrides["group_id"] = group_id or None
+        consumer = self._consumer(**consumer_overrides)
         try:
             partitions = [TopicPartition(topic, number) for number in (consumer.partitions_for_topic(topic) or set())]
             if not partitions:
@@ -261,6 +269,26 @@ class KafkaClient:
                 len(partitions),
                 timestamp_error,
             )
+        finally:
+            consumer.close()
+
+    def get_latest_record_timestamp(self, topic: str, group_id: str | None = None) -> int | None:
+        """Return the maximum timestamp from the latest retained record of each partition."""
+        consumer_overrides: dict[str, Any] = {
+            "enable_auto_commit": False,
+            "consumer_timeout_ms": 1500,
+            "request_timeout_ms": 5000,
+        }
+        if group_id is not None:
+            consumer_overrides["group_id"] = group_id or None
+        consumer = self._consumer(**consumer_overrides)
+        try:
+            partitions = [TopicPartition(topic, number) for number in (consumer.partitions_for_topic(topic) or set())]
+            if not partitions:
+                return None
+            beginning_offsets = consumer.beginning_offsets(partitions)
+            end_offsets = consumer.end_offsets(partitions)
+            return self._latest_timestamp(consumer, partitions, beginning_offsets, end_offsets)
         finally:
             consumer.close()
 

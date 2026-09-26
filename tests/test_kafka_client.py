@@ -724,6 +724,41 @@ def test_topic_statistics_uses_read_only_consumer_and_offset_apis():
     assert StatisticsConsumer.instances[-1].kwargs["enable_auto_commit"] is False
 
 
+def test_topic_statistics_uses_selected_consumer_group_id():
+    StatisticsConsumer.beginning = {TopicPartition("stats", 0): 0}
+    StatisticsConsumer.records = {TopicPartition("stats", 0): [Record("stats", 0, 0, 1000, None, b"")]}
+
+    KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=StatisticsConsumer).get_topic_statistics(
+        "stats", group_id="approved-viewer-group"
+    )
+
+    assert StatisticsConsumer.instances[-1].kwargs["group_id"] == "approved-viewer-group"
+
+
+def test_topic_statistics_preserves_configured_group_id_without_override():
+    StatisticsConsumer.beginning = {TopicPartition("stats", 0): 0}
+    StatisticsConsumer.records = {TopicPartition("stats", 0): [Record("stats", 0, 0, 1000, None, b"")]}
+
+    KafkaClient(
+        {"bootstrap_servers": "broker:9092", "group_id": "configured-viewer-group"},
+        consumer_factory=StatisticsConsumer,
+    ).get_topic_statistics("stats")
+
+    assert StatisticsConsumer.instances[-1].kwargs["group_id"] == "configured-viewer-group"
+
+
+def test_latest_record_timestamp_lookup_uses_selected_group_id():
+    StatisticsConsumer.beginning = {TopicPartition("stats", 0): 500}
+    StatisticsConsumer.records = {TopicPartition("stats", 0): [Record("stats", 0, 500, 9000, None, b"")]}
+
+    timestamp = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=StatisticsConsumer).get_latest_record_timestamp(
+        "stats", group_id="approved-viewer-group"
+    )
+
+    assert timestamp == 9000
+    assert StatisticsConsumer.instances[-1].kwargs["group_id"] == "approved-viewer-group"
+
+
 def test_topic_statistics_batches_latest_partition_reads():
     StatisticsConsumer.beginning = {
         TopicPartition("stats", 0): 10,
