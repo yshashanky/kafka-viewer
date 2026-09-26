@@ -2,8 +2,6 @@
 
 `kafka-viewer` is a lightweight local Streamlit UI for reading Kafka messages for inspection. Kafka connection details come from a local properties file. Consumer offsets are not committed or modified.
 
-Snappy-compressed Kafka records are supported through the normal `kafka-viewer` installation; no separate compression package installation is required.
-
 ## Installation
 
 ```bash
@@ -97,7 +95,7 @@ Additional SSL properties:
 - `kafka.ssl.password`
 - `kafka.ssl.crlfile`
 
-For JKS/PKCS12 stores, kafka-viewer securely converts certificate and key material into short-lived local files for `kafka-python`. JKS conversion uses the Java `keytool` executable (must be available on `PATH`). Passwords and private key contents are never printed.
+For JKS/PKCS12 stores, kafka-viewer extracts the required certificate and key material, converts it to short-lived PEM files, and passes those PEM files to `kafka-python`. JKS conversion uses the Java `keytool` executable (must be available on `PATH`). Passwords and private key contents are never printed.
 
 ## Configuration examples
 
@@ -207,27 +205,27 @@ If the prefix is empty, existing generation behavior is unchanged. If a prefix i
 
 ## Topic Statistics
 
-The dashboard includes a read-only Topic Statistics section for the selected topic. It reports:
+The dashboard reports these read-only statistics for the selected topic:
 
-- **Total Records**: records currently retained, calculated as the sum of each partition's end offset minus beginning offset. This is not the lifetime number of records ever published.
-- **Published Today**: records whose Kafka timestamps fall from local midnight through the start of the next local day.
-- **Last 1 Hour**: records whose Kafka timestamps fall within the previous hour, including the boundary.
-- **Latest Record Timestamp**: the newest Kafka record timestamp currently retained.
+- **Total Records**: records currently retained.
+- **Published Today**: records with Kafka timestamps from local midnight to the next local midnight.
+- **Last 1 Hour**: records with Kafka timestamps from the previous hour.
+- **Latest Record Timestamp**: the newest retained Kafka record timestamp.
 - **Partitions**: the selected topic's partition count.
 
-Use **Refresh Statistics** to obtain fresh values without clearing loaded messages, filters, or loading controls. The refresh time is shown separately from the latest record timestamp. Offset-based totals do not consume the topic; timestamp metrics use Kafka timestamp-to-offset lookup and inspect the final retained record in each non-empty partition using bounded batched reads. kafka-python 3.0.11 does not expose a MAX_TIMESTAMP/ListOffsets helper, so the viewer does not claim a broker-side maximum-timestamp query. The bounded fallback assumes the latest retained record in each partition represents that partition's latest timestamp; deployments with non-monotonic record timestamps should treat this metric as a best-effort limitation. If Kafka cannot provide a usable timestamp, timestamp metrics are shown as unavailable while retained totals remain available. Displayed times use the machine's local timezone.
+Use **Refresh Statistics** to update the values without clearing loaded messages, filters, or loading controls. Timestamp-based values use Kafka record timestamps and are displayed in the machine's local timezone; they may be unavailable when the required timestamp information cannot be retrieved.
 
-When a message filter is used with Latest mode, kafka-viewer scans partition-local latest regions and returns the newest matching records across the topic. Kafka record timestamps determine cross-partition recency; partition and offset provide deterministic tie-breaking. The global filter scan cap remains 5,000 records.
+In Latest mode, filtered results return the newest matching records across the topic using Kafka record timestamps for cross-partition recency.
 
 ### Message Filter Syntax
 
-The Message Filter is a case-insensitive literal substring filter applied to the searchable message value, not Kafka metadata such as keys, timestamps, partitions, offsets, or headers.
+Message Filter matches the searchable message value using case-insensitive literal substring matching. It does not search Kafka metadata.
 
 - `payment` matches messages containing `payment`.
-- `payment?failed?timeout` uses `?` as OR and matches a message containing any term.
-- `payment&failed&timeout` uses `&` as AND and requires all terms in the same message.
+- `payment?failed?timeout` uses `?` for OR.
+- `payment&failed&timeout` uses `&` for AND in the same message.
 
-Whitespace around terms is ignored and empty terms are discarded, so `payment??failed` and ` payment ? failed ` are valid. Terms remain literal text; regular-expression syntax is not interpreted. Mixing `?` and `&` is not supported and is rejected with a validation message. Blank or operator-only filters use the existing unfiltered behavior. Filtered Latest retrieval continues to use the adaptive scan strategy and its global 5,000-record safety cap rather than scanning the cap unnecessarily.
+Whitespace around terms is ignored, empty terms are discarded, and regular expressions are not interpreted. Mixing `?` and `&` is rejected. Blank or operator-only filters behave as an unfiltered load.
 
 ## Offset behavior
 
