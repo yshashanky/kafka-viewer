@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -9,6 +11,8 @@ from typing import Any, Callable, Iterable, Literal
 from kafka import KafkaConsumer, TopicPartition
 from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroDeserializer
+
+logger = logging.getLogger(__name__)
 
 FILTER_SCAN_CAP = 5000
 # Keep filtered Latest responsive while retaining a bounded global search budget.
@@ -168,6 +172,14 @@ def datetime_to_millis(value: datetime) -> int:
     return int(value.timestamp() * 1000)
 
 
+def _safe_diagnostic_message(exception: Exception) -> str:
+    message = str(exception)
+    message = re.sub(r"(?i)([a-z][a-z0-9+.-]*://)[^\s/@]+@", r"\1<redacted>@", message)
+    message = re.sub(r"(?i)(password|passwd|secret|token|private_key|jaas\.config)\s*[=:]\s*[^,;\s]+", r"\1=<redacted>", message)
+    message = re.sub(r"(?i)(username|user)\s*[=:]\s*[^,;\s]+", r"\1=<redacted>", message)
+    return message[:500]
+
+
 def _local_datetime(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.astimezone()
@@ -230,12 +242,22 @@ class KafkaClient:
             consumer_overrides["group_id"] = group_id or None
         consumer = self._consumer(**consumer_overrides)
         try:
-            partitions = [TopicPartition(topic, number) for number in (consumer.partitions_for_topic(topic) or set())]
+            try:
+                partitions = [TopicPartition(topic, number) for number in (consumer.partitions_for_topic(topic) or set())]
+                logger.debug("latest_timestamp partitions topic=%s group_id_present=%s partitions=%s", topic, group_id is not None, len(partitions))
+            except Exception as exc:
+                logger.exception("latest_timestamp partition discovery failed topic=%s group_id_present=%s error_type=%s error=%s", topic, group_id is not None, type(exc).__name__, _safe_diagnostic_message(exc))
+                raise
             if not partitions:
                 return TopicStatistics(0, 0, 0, None, 0)
 
-            beginning_offsets = consumer.beginning_offsets(partitions)
-            end_offsets = consumer.end_offsets(partitions)
+            try:
+                beginning_offsets = consumer.beginning_offsets(partitions)
+                end_offsets = consumer.end_offsets(partitions)
+                logger.debug("latest_timestamp offsets topic=%s group_id_present=%s beginning=%s end=%s", topic, group_id is not None, beginning_offsets, end_offsets)
+            except Exception as exc:
+                logger.exception("latest_timestamp offset lookup failed topic=%s group_id_present=%s error_type=%s error=%s", topic, group_id is not None, type(exc).__name__, _safe_diagnostic_message(exc))
+                raise
             total_records = sum(max(0, end_offsets[partition] - beginning_offsets[partition]) for partition in partitions)
             timestamp_error = None
             published_today: int | None = 0
@@ -256,7 +278,8 @@ class KafkaClient:
                 timestamp_failures += 1
             try:
                 latest_timestamp = self._latest_timestamp(consumer, partitions, beginning_offsets, end_offsets)
-            except Exception:
+            except Exception as exc:
+                logger.exception("latest_timestamp statistics lookup failed topic=%s group_id_present=%s error_type=%s error=%s", topic, group_id is not None, type(exc).__name__, _safe_diagnostic_message(exc))
                 latest_timestamp = None
                 timestamp_failures += 1
             if timestamp_failures:
@@ -284,11 +307,15 @@ class KafkaClient:
         consumer = self._consumer(**consumer_overrides)
         try:
             partitions = [TopicPartition(topic, number) for number in (consumer.partitions_for_topic(topic) or set())]
+            logger.debug("latest_timestamp direct partitions topic=%s group_id_present=%s partitions=%s", topic, group_id is not None, len(partitions))
             if not partitions:
                 return None
             beginning_offsets = consumer.beginning_offsets(partitions)
             end_offsets = consumer.end_offsets(partitions)
             return self._latest_timestamp(consumer, partitions, beginning_offsets, end_offsets)
+        except Exception as exc:
+            logger.exception("latest_timestamp direct lookup failed topic=%s group_id_present=%s error_type=%s error=%s", topic, group_id is not None, type(exc).__name__, _safe_diagnostic_message(exc))
+            raise
         finally:
             consumer.close()
 
@@ -318,6 +345,7 @@ class KafkaClient:
         beginning_offsets: dict[TopicPartition, int],
         end_offsets: dict[TopicPartition, int],
     ) -> int | None:
+        logger.debug("latest_timestamp calculation partitions=%s", len(partitions))
         latest_records = self._latest_retained_records(consumer, partitions, beginning_offsets, end_offsets)
         timestamps = [record.timestamp for record in latest_records if record.timestamp is not None]
         return max(timestamps) if timestamps else None
@@ -333,13 +361,32 @@ class KafkaClient:
         if not latest_partitions:
             return []
         records: dict[TopicPartition, Any] = {}
-        consumer.assign(latest_partitions)
+        try:
+            consumer.assign(latest_partitions)
+            logger.debug("latest_timestamp assign succeeded partitions=%s", len(latest_partitions))
+        except Exception as exc:
+            logger.exception("latest_timestamp assign failed error_type=%s error=%s", type(exc).__name__, _safe_diagnostic_message(exc))
+            raise
         for partition in latest_partitions:
-            consumer.seek(partition, end_offsets[partition] - 1)
+            seek_offset = end_offsets[partition] - 1
+            try:
+                consumer.seek(partition, seek_offset)
+                logger.debug("latest_timestamp seek partition=%s beginning=%s end=%s seek=%s", partition.partition, beginning_offsets[partition], end_offsets[partition], seek_offset)
+            except Exception as exc:
+                logger.exception("latest_timestamp seek failed partition=%s seek=%s error_type=%s error=%s", partition.partition, seek_offset, type(exc).__name__, _safe_diagnostic_message(exc))
+                raise
         for _ in range(3):
-            batch = consumer.poll(timeout_ms=1000)
-            for record in _records(batch):
+            poll_number = _ + 1
+            try:
+                batch = consumer.poll(timeout_ms=1000)
+                returned_records = list(_records(batch))
+                logger.debug("latest_timestamp poll=%s returned_records=%s", poll_number, len(returned_records))
+            except Exception as exc:
+                logger.exception("latest_timestamp poll failed poll=%s error_type=%s error=%s", poll_number, type(exc).__name__, _safe_diagnostic_message(exc))
+                raise
+            for record in returned_records:
                 partition = TopicPartition(record.topic, record.partition)
+                logger.debug("latest_timestamp record partition=%s offset=%s timestamp=%s", record.partition, record.offset, record.timestamp)
                 if (
                     partition in latest_partitions
                     and beginning_offsets[partition] <= record.offset < end_offsets[partition]
