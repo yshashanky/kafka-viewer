@@ -43,6 +43,8 @@ class StatisticsConsumer:
         self.assigned = []
         self.positions = {}
         self.closed = False
+        self.assign_calls = []
+        self.poll_calls = 0
         self.__class__.instances.append(self)
 
     def partitions_for_topic(self, topic):
@@ -70,11 +72,13 @@ class StatisticsConsumer:
 
     def assign(self, partitions):
         self.assigned = partitions
+        self.assign_calls.append(list(partitions))
 
     def seek(self, partition, offset):
         self.positions[partition] = offset
 
     def poll(self, timeout_ms):
+        self.poll_calls += 1
         batch = {}
         for partition in self.assigned:
             position = self.positions[partition]
@@ -718,6 +722,25 @@ def test_topic_statistics_uses_read_only_consumer_and_offset_apis():
     KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=StatisticsConsumer).get_topic_statistics("stats")
 
     assert StatisticsConsumer.instances[-1].kwargs["enable_auto_commit"] is False
+
+
+def test_topic_statistics_batches_latest_partition_reads():
+    StatisticsConsumer.beginning = {
+        TopicPartition("stats", 0): 10,
+        TopicPartition("stats", 1): 20,
+    }
+    StatisticsConsumer.records = {
+        TopicPartition("stats", 0): [Record("stats", 0, 10, 1000, None, b"")],
+        TopicPartition("stats", 1): [Record("stats", 1, 20, 2000, None, b"")],
+    }
+
+    client = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=StatisticsConsumer)
+    statistics = client.get_topic_statistics("stats")
+    consumer = StatisticsConsumer.instances[-1]
+
+    assert statistics.latest_timestamp == 2000
+    assert len(consumer.assign_calls) == 1
+    assert consumer.poll_calls <= 3
 
 
 def test_date_range_filters_record_timestamps():
