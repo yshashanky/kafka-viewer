@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -787,6 +788,25 @@ def test_latest_record_timestamp_accepts_offset_gap_before_end_offset():
     timestamp = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=GapStatisticsConsumer).get_latest_record_timestamp("stats")
 
     assert timestamp == 9000
+
+
+def test_latest_timestamp_diagnostics_capture_safe_poll_evidence(caplog):
+    StatisticsConsumer.beginning = {TopicPartition("stats", 0): 0}
+    StatisticsConsumer.records = {TopicPartition("stats", 0): [Record("stats", 0, 0, 9000, None, b"payload")]}
+
+    with caplog.at_level(logging.DEBUG, logger="kafka_viewer.kafka_client"):
+        timestamp = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=StatisticsConsumer).get_latest_record_timestamp(
+            "stats", group_id="approved-viewer-group"
+        )
+
+    diagnostics = "\n".join(record.message for record in caplog.records)
+    assert timestamp == 9000
+    assert "latest_timestamp assign succeeded" in diagnostics
+    assert "latest_timestamp seek partition=0" in diagnostics
+    assert "latest_timestamp poll=1 returned_records=1" in diagnostics
+    assert "timestamp=9000" in diagnostics
+    assert "payload" not in diagnostics
+    assert "approved-viewer-group" not in diagnostics
 
 
 def test_topic_statistics_batches_latest_partition_reads():
