@@ -1,0 +1,2 @@
+recursive-include tests/certification *.py
+recursive-include examples/certification *.example

@@ -5,10 +5,17 @@ import json
 import sys
 from dataclasses import replace
 from datetime import datetime, time, timezone
+from html import escape
 
 import streamlit as st
 
-from kafka_viewer.config import build_consumer_config, build_schema_registry_config, load_properties
+from kafka_viewer.config import (
+    DEFAULT_FILTER_SCAN_MAX_RECORDS,
+    build_consumer_config,
+    build_schema_registry_config,
+    get_filter_scan_max_records,
+    load_properties,
+)
 from kafka_viewer.kafka_client import (
     KafkaClient,
     export_messages,
@@ -58,6 +65,7 @@ def main() -> None:
         return
 
     try:
+        filter_scan_max_records = get_filter_scan_max_records(properties)
         consumer_config, unsupported = build_consumer_config(properties)
         schema_registry_config = build_schema_registry_config(properties)
     except ValueError as exc:
@@ -68,7 +76,7 @@ def main() -> None:
     bootstrap_servers = properties["kafka.bootstrap.servers"]
     st.write(f"Broker: `{truncate_broker_display(bootstrap_servers)}`")
     try:
-        client = KafkaClient(consumer_config, schema_registry_config)
+        client = KafkaClient(consumer_config, schema_registry_config, filter_scan_max_records=filter_scan_max_records)
     except Exception:
         st.error("Unable to initialize Schema Registry Avro deserialization")
         return
@@ -152,8 +160,9 @@ def main() -> None:
     )
     st.session_state.message_filter = filter_text
 
+    effective_scan_cap = filter_scan_max_records if mode == "latest" else DEFAULT_FILTER_SCAN_MAX_RECORDS
     if filter_text.strip():
-        st.caption("Filter-aware scans stop after 5,000 inspected records to keep loading responsive.")
+        st.caption(f"Filter-aware scans stop after {effective_scan_cap:,} inspected records to keep loading responsive.")
 
     st.markdown(
         f"""
@@ -167,6 +176,16 @@ def main() -> None:
             background-color: {REFRESH_STATISTICS_COLOR};
             border-color: {REFRESH_STATISTICS_COLOR};
             color: #1E3A8A;
+        }}
+        .kv-latest-record-timestamp .kv-timestamp-label {{
+            font-size: 0.875rem;
+            margin-bottom: 0.25rem;
+        }}
+        .kv-latest-record-timestamp .kv-timestamp-value {{
+            font-size: clamp(1rem, 2vw, 2.25rem);
+            line-height: 1.2;
+            white-space: normal;
+            overflow-wrap: anywhere;
         }}
         </style>
         """,
@@ -219,7 +238,15 @@ def main() -> None:
         latest_value = "No records" if statistics.latest_timestamp is None and statistics.total_records == 0 else (
             "Unavailable" if statistics.latest_timestamp is None else datetime.fromtimestamp(statistics.latest_timestamp / 1000, timezone.utc).astimezone().strftime("%d-%b-%Y %H:%M:%S")
         )
-        metric_columns[4].metric("Latest Record Timestamp", latest_value)
+        # A dedicated value avoids st.metric's single-line ellipsis, including
+        # on older supported Streamlit versions without keyed containers.
+        metric_columns[4].markdown(
+            '<div class="kv-latest-record-timestamp">'
+            '<div class="kv-timestamp-label">Latest Record Timestamp</div>'
+            f'<div class="kv-timestamp-value" title="{escape(latest_value, quote=True)}">'
+            f'{escape(latest_value)}</div></div>',
+            unsafe_allow_html=True,
+        )
         if statistics.timestamp_error:
             st.warning(statistics.timestamp_error)
         refreshed_at = st.session_state.get("topic_statistics_refreshed_at")
@@ -233,7 +260,7 @@ def main() -> None:
     if filter_text.strip():
         metadata = getattr(client, "last_scan_metadata", {})
         if metadata.get("cap_reached") and metadata.get("matches", 0) < metadata.get("requested", 0):
-            st.warning("The filter reached the 5,000-record scan cap. Results may be partial.")
+            st.warning(f"The filter reached the {effective_scan_cap:,}-record scan cap. Results may be partial.")
         else:
             st.caption(f"Scanned {metadata.get('scanned', 0)} record(s) matching the filter.")
     json_payload = json.dumps(export_messages(messages), ensure_ascii=False, indent=2)

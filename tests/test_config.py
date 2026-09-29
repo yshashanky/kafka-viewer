@@ -5,10 +5,32 @@ import pytest
 from kafka_viewer import config
 from kafka_viewer.config import (
     ConfigError,
+    get_filter_scan_max_records,
     build_consumer_config,
     build_schema_registry_config,
     load_properties,
 )
+
+
+@pytest.mark.parametrize("value,expected", [(None, 5000), ("20000", 20000), ("100", 100), (" 500 ", 500), ("100000", 100000), (str(10**100), 10**100)])
+def test_filter_scan_max_records_property(tmp_path, value, expected):
+    path = tmp_path / "viewer.properties"
+    text = "kafka.bootstrap.servers=broker:9092\n"
+    if value is not None:
+        text += f"kafka.viewer.filter.scan.max.records={value}\n"
+    path.write_text(text, encoding="utf-8")
+    properties = load_properties(path)
+    assert get_filter_scan_max_records(properties) == expected
+    consumer_config, unsupported = build_consumer_config(properties)
+    assert consumer_config == {"bootstrap_servers": "broker:9092", "enable_auto_commit": False}
+    assert unsupported == []
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "12.5", "", " ", "1_000", "1e4"])
+def test_invalid_filter_scan_max_records(value):
+    with pytest.raises(ConfigError) as error:
+        get_filter_scan_max_records({"kafka.viewer.filter.scan.max.records": value, "password": "private-test-value"})
+    assert str(error.value) == "kafka.viewer.filter.scan.max.records must be a positive integer"
 
 
 def test_load_properties_trims_and_ignores_comments(tmp_path):

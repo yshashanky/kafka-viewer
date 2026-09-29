@@ -12,6 +12,10 @@
 # ============================================================
 kafka.bootstrap.servers=localhost:9092
 
+# Maximum total records inspected during filtered Latest scans, across all partitions.
+# Default: 5000. Does not change Message Count or Kafka fetch/poll sizes.
+# kafka.viewer.filter.scan.max.records=20000
+
 # ============================================================
 # Common Kafka consumer/client settings (optional)
 # ============================================================

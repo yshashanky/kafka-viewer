@@ -1,0 +1,3 @@
+# Omit --destination-config to use the source connection instead.
+kafka.bootstrap.servers=localhost:9093
+kafka.security.protocol=PLAINTEXT

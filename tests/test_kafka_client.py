@@ -869,3 +869,160 @@ def test_validate_count_rejects_invalid_values(value):
 
 def test_validate_count_accepts_positive_integer():
     assert validate_count("3") == 3
+
+
+class ScanBudgetConsumer(PartitionedConsumer):
+    """Batched, direct-index fixture for large adaptive windows."""
+
+    def poll(self, timeout_ms):
+        batch = {}
+        for partition in self.assigned:
+            index = self.positions[partition] - self.beginning[partition]
+            rows = self.records[partition][index:index + 137]
+            if rows:
+                batch[partition] = rows
+                self.positions[partition] = rows[-1].offset + 1
+        return batch
+
+
+@pytest.mark.parametrize("sizes,matching,count,cap,expected_scanned", [
+    pytest.param((3, 19997), {(0, 0), (1, 0), (1, 5000), (1, 10000), (1, 15000)},
+                 5, 50000, 20000, id="five-matches-exhaustion"),
+    pytest.param((3, 19997), {(0, 0), (1, 0), (1, 5000), (1, 10000)},
+                 5, 50000, 20000, id="fewer-than-requested"),
+    pytest.param((1, 19999), {(0, 0), (1, 0)},
+                 5, 50000, 20000, id="tiny-partition-exhausted-early"),
+    pytest.param((1, 7, 92, 19900), {(0, 0), (1, 0), (2, 0), (3, 0), (3, 1)},
+                 6, 50000, 20000, id="four-uneven-partitions-timestamp-ties"),
+    pytest.param((3, 19997), set(), 5, 50000, 20000, id="no-matches-exhaustion"),
+    pytest.param((3, 19997), set(), 5, 5000, 5000, id="global-cap-below-availability"),
+    pytest.param((3, 19997), set(), 5, 100, 100, id="cap-below-initial-target"),
+    pytest.param((3, 19997), {(0, 2), (1, 19995), (1, 19996)},
+                 2, 50000, 500, id="stop-after-initial-window"),
+])
+def test_latest_filter_uneven_partition_exhaustion(
+    monkeypatch, sizes, matching, count, cap, expected_scanned
+):
+    class BoundedConsumer(ScanBudgetConsumer):
+        poll_calls = 0
+
+        def poll(self, timeout_ms):
+            self.poll_calls += 1
+            assert self.poll_calls <= 500, "Scanner failed to terminate within bounded polls"
+            return super().poll(timeout_ms)
+
+    # Nonzero beginnings also detect seeks outside retained data.
+    BoundedConsumer.beginning = {TopicPartition("events", p): 7 for p in range(len(sizes))}
+    BoundedConsumer.records = {
+        TopicPartition("events", p): [
+            Record("events", p, n + 7, n // 2, None,
+                   b"match" if (p, n) in matching else b"other")
+            for n in range(size)
+        ]
+        for p, size in enumerate(sizes)
+    }
+    client = KafkaClient({}, consumer_factory=BoundedConsumer, filter_scan_max_records=cap)
+    inspected = []
+    original_message = client._message
+
+    def message(record, timestamp):
+        inspected.append((record.partition, record.offset))
+        return original_message(record, timestamp)
+
+    monkeypatch.setattr(client, "_message", message)
+    messages = client.load_messages("events", "group", "latest", count, filter_text="match")
+
+    expected = sorted(matching, key=lambda item: (item[1] // 2, item[0], item[1]))[-count:]
+    assert [(m.partition, m.offset) for m in messages] == [(p, n + 7) for p, n in expected]
+    assert len(inspected) == len(set(inspected)) == expected_scanned
+    assert client.last_scan_metadata["scanned"] == expected_scanned
+    assert expected_scanned <= min(cap, sum(sizes))
+    assert client.last_scan_metadata["cap_reached"] is (expected_scanned == cap)
+    if expected_scanned == sum(sizes):
+        assert set(inspected) == {(p, n + 7) for p, size in enumerate(sizes) for n in range(size)}
+    consumer = BoundedConsumer.instances[-1]
+    for p, size in enumerate(sizes):
+        seeks = [offset for partition, offset in consumer.seeks if partition.partition == p]
+        assert all(7 <= offset < 7 + size for offset in seeks)
+        assert all(new < old for old, new in zip(seeks, seeks[1:]))
+        if size == 1:
+            assert seeks == [7]
+    assert consumer.kwargs["enable_auto_commit"] is False
+
+
+@pytest.mark.parametrize("cap,targets", [
+    (None, [500, 1000, 2000, 4000, 5000]),
+    (100, [100]),
+    (20000, [500, 1000, 2000, 4000, 8000, 16000, 20000]),
+])
+def test_configured_latest_cap_is_global_adaptive_and_never_reinspects(monkeypatch, cap, targets):
+    ScanBudgetConsumer.beginning = {TopicPartition("events", p): 0 for p in (0, 1)}
+    ScanBudgetConsumer.records = {
+        TopicPartition("events", p): [Record("events", p, n, n, None, b"other") for n in range(12000)]
+        for p in (0, 1)
+    }
+    kwargs = {} if cap is None else {"filter_scan_max_records": cap}
+    client = KafkaClient({"bootstrap_servers": "broker:9092", "max_poll_records": 137},
+                         consumer_factory=ScanBudgetConsumer, **kwargs)
+    inspected, expansions = [], []
+    original_message, original_targets = client._message, client._partition_scan_targets
+    def message(record, timestamp):
+        inspected.append((record.partition, record.offset))
+        return original_message(record, timestamp)
+    def partition_targets(beginnings, ends, target):
+        expansions.append(target)
+        return original_targets(beginnings, ends, target)
+    monkeypatch.setattr(client, "_message", message)
+    monkeypatch.setattr(client, "_partition_scan_targets", partition_targets)
+
+    assert client.load_messages("events", "group", "latest", 10, filter_text="match") == []
+    assert client.filter_scan_max_records == (5000 if cap is None else cap)
+    assert len(inspected) == client.last_scan_metadata["scanned"] == client.filter_scan_max_records
+    assert len(inspected) == len(set(inspected))
+    assert {p for p, _ in inspected} == {0, 1}
+    assert expansions == targets
+    assert client.last_scan_metadata["cap_reached"] is True
+    assert ScanBudgetConsumer.instances[-1].kwargs["max_poll_records"] == 137
+    assert ScanBudgetConsumer.instances[-1].kwargs["enable_auto_commit"] is False
+    assert "filter_scan_max_records" not in ScanBudgetConsumer.instances[-1].kwargs
+
+
+def test_custom_latest_cap_preserves_matching_count_and_unfiltered_path():
+    ScanBudgetConsumer.beginning = {TopicPartition("events", 0): 0}
+    ScanBudgetConsumer.records = {TopicPartition("events", 0): [
+        Record("events", 0, n, n, None, b"match" if n % 10 == 0 else b"other") for n in range(1000)
+    ]}
+    client = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=ScanBudgetConsumer,
+                         filter_scan_max_records=100)
+    messages = client.load_messages("events", "group", "latest", 3, filter_text="match")
+    assert [m.offset for m in messages] == [970, 980, 990]
+    assert client.last_scan_metadata["scanned"] == 100
+    assert client.last_scan_metadata["matches"] == 3
+
+    unfiltered = client.load_messages("events", "group", "latest", 150)
+    baseline = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=ScanBudgetConsumer)
+    assert unfiltered == baseline.load_messages("events", "group", "latest", 150)
+    assert len(unfiltered) == 150
+
+
+@pytest.mark.parametrize("mode", ["beginning", "from_date", "range"])
+def test_custom_latest_budget_does_not_change_other_filtered_modes(mode):
+    ScanBudgetConsumer.beginning = {TopicPartition("events", 0): 0}
+    ScanBudgetConsumer.records = {TopicPartition("events", 0): [
+        Record("events", 0, n, n, None, b"other") for n in range(5100)
+    ]}
+    class TimeConsumer(ScanBudgetConsumer):
+        def offsets_for_times(self, timestamps):
+            return {p: Offset(0) for p in timestamps}
+    client = KafkaClient({"bootstrap_servers": "broker:9092"}, consumer_factory=TimeConsumer,
+                         filter_scan_max_records=100)
+    assert client.load_messages("events", "group", mode, 1, filter_text="match",
+                                start=datetime.fromtimestamp(0, timezone.utc),
+                                end=datetime.fromtimestamp(10, timezone.utc)) == []
+    assert client.last_scan_metadata["scanned"] == FILTER_SCAN_CAP
+
+
+@pytest.mark.parametrize("cap", [0, -1, 12.5, True, "100"])
+def test_programmatic_scan_budget_requires_positive_integer(cap):
+    with pytest.raises(ValueError, match="positive integer"):
+        KafkaClient({}, filter_scan_max_records=cap)
