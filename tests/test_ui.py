@@ -2,6 +2,8 @@ from kafka_viewer.config import build_consumer_config
 from kafka_viewer.ui import LOAD_BUTTON_COLOR, REFRESH_STATISTICS_COLOR, truncate_broker_display
 from pathlib import Path
 
+import pytest
+
 
 UI_SOURCE = Path(__file__).parents[1] / "kafka_viewer" / "ui.py"
 
@@ -60,3 +62,61 @@ def test_load_messages_updates_shared_latest_timestamp_state():
     assert "replace(statistics, latest_timestamp=latest_timestamp)" in source
     assert "st.session_state.latest_record_timestamp = latest_timestamp" in source
     assert "st.session_state.latest_record_timestamp = st.session_state.topic_statistics.latest_timestamp" in source
+
+
+@pytest.mark.parametrize("timestamp,total,expected", [
+    (1790677194123, 12, None),
+    (None, 12, "Unavailable"),
+    (None, 0, "No records"),
+])
+def test_latest_timestamp_display_preserves_value_and_other_metrics(monkeypatch, timestamp, total, expected):
+    from datetime import datetime, timezone
+    import sys
+
+    from streamlit.testing.v1 import AppTest
+    from kafka_viewer.kafka_client import KafkaClient, TopicStatistics
+    import kafka_viewer.config as config
+
+    monkeypatch.setattr(sys, "argv", [str(UI_SOURCE), "--config", "display-test.properties"])
+    monkeypatch.setattr(config, "load_properties", lambda path: {"kafka.bootstrap.servers": "localhost:9092"})
+    monkeypatch.setattr(KafkaClient, "topics", lambda self: {"test-topic"})
+    monkeypatch.setattr(KafkaClient, "get_topic_statistics", lambda *args, **kwargs: TopicStatistics(total, 7, 3, timestamp, 2))
+
+    app = AppTest.from_file(str(UI_SOURCE), default_timeout=60).run()
+    assert not app.exception
+    if expected is None:
+        expected = datetime.fromtimestamp(timestamp / 1000, timezone.utc).astimezone().strftime("%d-%b-%Y %H:%M:%S")
+        assert expected.endswith(":54")
+    timestamp_markup, = [m.value for m in app.markdown if '<div class="kv-latest-record-timestamp">' in m.value]
+    assert f'title="{expected}"' in timestamp_markup
+    assert f'>{expected}</div>' in timestamp_markup
+    assert [(m.label, m.value) for m in app.metric] == [
+        ("Total Records", str(total)), ("Published Today", "7"),
+        ("Last 1 Hour", "3"), ("Partitions", "2"),
+    ]
+
+
+def test_viewer_wires_configured_budget_and_displays_effective_cap(monkeypatch):
+    import sys
+    from streamlit.testing.v1 import AppTest
+    from kafka_viewer.kafka_client import KafkaClient, TopicStatistics
+    import kafka_viewer.config as config
+
+    monkeypatch.setattr(sys, "argv", [str(UI_SOURCE), "--config", "display-test.properties"])
+    monkeypatch.setattr(config, "load_properties", lambda path: {
+        "kafka.bootstrap.servers": "localhost:9092", "kafka.viewer.filter.scan.max.records": "20000",
+    })
+    budgets = []
+    def topics(client):
+        budgets.append(client.filter_scan_max_records)
+        return {"test-topic"}
+    monkeypatch.setattr(KafkaClient, "topics", topics)
+    monkeypatch.setattr(KafkaClient, "get_topic_statistics", lambda *args, **kwargs: TopicStatistics(0, 0, 0, None, 1))
+    app = AppTest.from_file(str(UI_SOURCE), default_timeout=60).run()
+    assert not app.exception
+    assert budgets == [20000]
+    next(t for t in app.text_input if t.label == "Message Filter (optional)").set_value("match").run()
+    assert any("20,000 inspected records" in c.value for c in app.caption)
+    app.radio[0].set_value("From beginning").run()
+    assert not app.exception
+    assert any("5,000 inspected records" in c.value for c in app.caption)

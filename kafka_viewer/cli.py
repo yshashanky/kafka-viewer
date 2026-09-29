@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .config import build_consumer_config, build_schema_registry_config, load_properties
+from .config import build_consumer_config, build_schema_registry_config, get_filter_scan_max_records, load_properties
 
 
 def main() -> None:
@@ -13,6 +13,7 @@ def main() -> None:
     args = parser.parse_args()
     config_path = Path(args.config)
     properties = load_properties(config_path)
+    get_filter_scan_max_records(properties)
     build_consumer_config(properties)
     build_schema_registry_config(properties)
     command = [

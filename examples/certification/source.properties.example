@@ -1,0 +1,3 @@
+# Placeholder local broker. Reuse kafka-viewer.properties.example for SSL/SASL.
+kafka.bootstrap.servers=localhost:9092
+kafka.security.protocol=PLAINTEXT

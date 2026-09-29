@@ -16,6 +16,26 @@ class ConfigError(ValueError):
     """Raised when the viewer configuration is invalid."""
 
 
+DEFAULT_FILTER_SCAN_MAX_RECORDS = 5000
+FILTER_SCAN_MAX_RECORDS_PROPERTY = "kafka.viewer.filter.scan.max.records"
+
+
+def get_filter_scan_max_records(properties: dict[str, str]) -> int:
+    """Viewer-only budget; never forwarded as a Kafka consumer option."""
+    if FILTER_SCAN_MAX_RECORDS_PROPERTY not in properties:
+        return DEFAULT_FILTER_SCAN_MAX_RECORDS
+    value = properties[FILTER_SCAN_MAX_RECORDS_PROPERTY].strip()
+    try:
+        if not re.fullmatch(r"[0-9]+", value):
+            raise ValueError
+        result = int(value)
+        if result <= 0:
+            raise ValueError
+    except ValueError:
+        raise ConfigError(f"{FILTER_SCAN_MAX_RECORDS_PROPERTY} must be a positive integer") from None
+    return result
+
+
 KAFKA_PROPERTY_MAP = {
     "kafka.bootstrap.servers": "bootstrap_servers",
     "kafka.api.version": "api_version",
@@ -96,6 +116,7 @@ STORE_CONFIGURATION_PROPERTIES = {
 }
 
 _INTERNAL_CONFIGURATION_PROPERTIES = {
+    FILTER_SCAN_MAX_RECORDS_PROPERTY,
     "kafka.sasl.username",
     "kafka.sasl.password",
     "kafka.sasl.jaas.config",

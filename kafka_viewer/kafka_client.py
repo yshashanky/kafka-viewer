@@ -12,11 +12,12 @@ from kafka import KafkaConsumer, TopicPartition
 from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroDeserializer
 
+from .config import DEFAULT_FILTER_SCAN_MAX_RECORDS
+
 logger = logging.getLogger(__name__)
 
-FILTER_SCAN_CAP = 5000
+FILTER_SCAN_CAP = DEFAULT_FILTER_SCAN_MAX_RECORDS
 # Keep filtered Latest responsive while retaining a bounded global search budget.
-MAX_SCAN = FILTER_SCAN_CAP
 MIN_SCAN = 500
 SCAN_MULTIPLIER = 50
 
@@ -205,7 +206,12 @@ class KafkaClient:
         consumer_factory: Callable[..., Any] = KafkaConsumer,
         schema_registry_factory: Callable[..., Any] = SchemaRegistryClient,
         avro_deserializer_factory: Callable[..., Any] = AvroDeserializer,
+        *,
+        filter_scan_max_records: int = DEFAULT_FILTER_SCAN_MAX_RECORDS,
     ):
+        if type(filter_scan_max_records) is not int or filter_scan_max_records <= 0:
+            raise ValueError("filter_scan_max_records must be a positive integer")
+        self.filter_scan_max_records = filter_scan_max_records
         self.consumer_config = consumer_config
         self.consumer_factory = consumer_factory
         self.value_deserializer = None
@@ -407,11 +413,12 @@ class KafkaClient:
         count: int,
         filter_expression: FilterExpression,
     ) -> list[Message]:
-        initial_target = min(MAX_SCAN, max(MIN_SCAN, count * SCAN_MULTIPLIER))
+        max_scan = self.filter_scan_max_records
+        initial_target = min(max_scan, max(MIN_SCAN, count * SCAN_MULTIPLIER))
         scan_target = initial_target
         scan_ends = dict(end_offsets)
         matches: list[Message] = []
-        while scan_ends and self.last_scan_metadata["scanned"] < FILTER_SCAN_CAP:
+        while scan_ends and self.last_scan_metadata["scanned"] < max_scan:
             partition_targets = self._partition_scan_targets(
                 beginning_offsets,
                 end_offsets,
@@ -425,14 +432,16 @@ class KafkaClient:
                 for partition in scan_ends
                 if partition in partition_targets and scan_ends[partition] > beginning_offsets[partition]
             }
-            if not windows:
-                break
+            # Cumulative allocations can stay unchanged for small partitions.
+            # Skip their empty windows, retaining unread offsets for expansion.
+            windows = {partition: window for partition, window in windows.items() if window[0] < window[1]}
             active = set(windows)
-            consumer.assign(list(active))
+            if active:
+                consumer.assign(list(active))
             for partition, (window_start, _) in windows.items():
                 consumer.seek(partition, window_start)
             idle_polls = 0
-            while active and self.last_scan_metadata["scanned"] < FILTER_SCAN_CAP:
+            while active and self.last_scan_metadata["scanned"] < max_scan:
                 batch = consumer.poll(timeout_ms=1000)
                 if not batch:
                     idle_polls += 1
@@ -449,10 +458,10 @@ class KafkaClient:
                     message = self._message(record, record.timestamp)
                     if message_matches_filter(message, filter_expression):
                         matches.append(message)
-                    if self.last_scan_metadata["scanned"] >= FILTER_SCAN_CAP:
+                    if self.last_scan_metadata["scanned"] >= max_scan:
                         self.last_scan_metadata["cap_reached"] = True
                         break
-                if self.last_scan_metadata["scanned"] >= FILTER_SCAN_CAP:
+                if self.last_scan_metadata["scanned"] >= max_scan:
                     break
                 for partition in list(active):
                     if consumer.position(partition) >= windows[partition][1]:
@@ -460,14 +469,11 @@ class KafkaClient:
             if len(matches) >= count:
                 break
             for partition, (window_start, _) in windows.items():
-                if window_start >= scan_ends[partition]:
-                    scan_ends.pop(partition, None)
-                    continue
                 scan_ends[partition] = window_start
             scan_ends = {partition: end for partition, end in scan_ends.items() if end > beginning_offsets[partition]}
-            if self.last_scan_metadata["scanned"] >= FILTER_SCAN_CAP:
+            if self.last_scan_metadata["scanned"] >= max_scan:
                 break
-            next_target = min(MAX_SCAN, scan_target * 2)
+            next_target = min(max_scan, scan_target * 2)
             if next_target <= scan_target:
                 break
             scan_target = next_target

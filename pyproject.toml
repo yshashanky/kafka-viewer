@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kafka-viewer"
-version = "0.3.8"
+version = "0.4.0"
 description = "A lightweight local Kafka message inspection tool"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,6 +20,9 @@ dependencies = [
     "python-snappy>=0.6,<1",
     "python-dotenv>=1.2.2,<2",
     "streamlit>=1.35,<2",
+    "defusedxml>=0.7.1,<0.8",
+    "protobuf>=5.26.1,<8",
+    "tzdata>=2024.1,<2028",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +43,7 @@ Issues = "https://github.com/yshashanky/kafka-viewer/issues"
 
 [project.scripts]
 kafka-viewer = "kafka_viewer.cli:main"
+kafka-viewer-certify = "kafka_viewer.certification.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["kafka_viewer*"]

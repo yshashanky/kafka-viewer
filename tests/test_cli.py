@@ -5,6 +5,15 @@ import pytest
 from kafka_viewer import cli
 
 
+def test_cli_rejects_invalid_viewer_scan_budget_before_launch(tmp_path, monkeypatch):
+    path = tmp_path / "viewer.properties"
+    path.write_text("kafka.bootstrap.servers=broker:9092\nkafka.viewer.filter.scan.max.records=0\n", encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["kafka-viewer", "--config", str(path)])
+    monkeypatch.setattr(cli.subprocess, "call", lambda *args, **kwargs: pytest.fail("UI must not start"))
+    with pytest.raises(ValueError, match="kafka.viewer.filter.scan.max.records must be a positive integer"):
+        cli.main()
+
+
 def test_cli_requires_config_option(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["kafka-viewer"])
 
